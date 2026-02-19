@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+venv/
+env/
+.venv/
+
+# Data
+data/
+
+# Models
+models/*.h5
+models/*.pt
+models/*.pth
+
+# OS
+.DS_Store
+Thumbs.db
