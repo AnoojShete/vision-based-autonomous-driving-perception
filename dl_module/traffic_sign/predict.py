@@ -41,28 +41,19 @@ def predict_traffic_sign(image_path):
     # 1. Read Image
     img = cv2.imread(image_path)
     
-    # 2. Preprocess
-    img = cv2.resize(img, (32, 32))
+    img = cv2.resize(img, (30, 30))
     
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    
+    # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) 
+    # Normalize pixel values to 0-1
     img = img / 255.0
+    
+    # 3. Reshape for Model (1 image, 30, 30, 3)
     img = np.expand_dims(img, axis=0)
     
-    # 3. Predict & DEBUG
+    # 4. Predict
     predictions = model.predict(img)
+    class_index = np.argmax(predictions)
+    confidence = np.max(predictions)
     
-    top_3_indices = np.argsort(predictions[0])[-3:][::-1]
-    
-    print(f"\n🔍 DEBUG INFO for {os.path.basename(image_path)}:")
-    for i in top_3_indices:
-        class_name = CLASSES.get(i, "Unknown")
-        confidence = predictions[0][i] * 100
-        print(f"   - {class_name} (Class {i}): {confidence:.2f}%")
-    print("--------------------------------------------------\n")
-
-    best_index = top_3_indices[0]
-    result_text = CLASSES.get(best_index, "Unknown")
-    confidence = predictions[0][best_index]
-    
+    result_text = CLASSES.get(class_index, "Unknown")
     return f"{result_text} ({confidence*100:.1f}%)"
