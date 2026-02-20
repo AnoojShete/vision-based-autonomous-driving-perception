@@ -837,45 +837,95 @@ class AutoDriveApp(tb.Window):
         if not target:
             messagebox.showerror("Error", "Select a target column.")
             return
+
         self.log(f"[INFO] Generating confusion matrix for {algo}…")
+        
+        popup = tk.Toplevel(self)
+        popup.title(f"Confusion Matrix — {algo}")
+        popup.geometry("750x600")
+        popup.configure(bg=CARD_BG)
+
         try:
-            import pandas as pd
             import matplotlib
             matplotlib.use("TkAgg")
             import matplotlib.pyplot as plt
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
             from sklearn.model_selection import train_test_split
             from sklearn.metrics import ConfusionMatrixDisplay
             from sklearn.tree import DecisionTreeClassifier
             from sklearn.naive_bayes import GaussianNB
             from sklearn.svm import SVC
+            import os
 
+            # 1. Train Model (Quick Retrain for plotting)
             X = self.df.drop(columns=[target])
             y = self.df[target]
             X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-            models = {
-                "Decision Tree": DecisionTreeClassifier(),
-                "Naive Bayes":   GaussianNB(),
-                "SVM":           SVC(),
-            }
+            models = { "Decision Tree": DecisionTreeClassifier(), "Naive Bayes": GaussianNB(), "SVM": SVC() }
             clf = models.get(algo, DecisionTreeClassifier())
             clf.fit(X_train, y_train)
 
+            # 2. Setup Plot (Dark Theme)
             fig, ax = plt.subplots(figsize=(6, 5))
-            fig.patch.set_facecolor("#12151c")
-            ax.set_facecolor("#1a1e2a")
-            ConfusionMatrixDisplay.from_estimator(clf, X_test, y_test, ax=ax,
-                                                  colorbar=False, cmap="Blues")
-            ax.set_title(f"Confusion Matrix — {algo}", color="#e8eaf0")
-            ax.tick_params(colors="#e8eaf0")
-            ax.xaxis.label.set_color("#e8eaf0")
-            ax.yaxis.label.set_color("#e8eaf0")
+            fig.patch.set_facecolor(CARD_BG)
+            ax.set_facecolor(CONTENT_BG)
+
+            # 3. Smart Display Logic
+            n_classes = len(clf.classes_)
+            
+            # If > 20 classes, turn off text inside boxes and hide axis labels
+            # This makes the "Diagonal Line" visible without text clutter
+            hide_labels = n_classes > 20
+            
+            disp = ConfusionMatrixDisplay.from_estimator(
+                clf, X_test, y_test, ax=ax,
+                colorbar=True, cmap="Blues",
+                include_values=not hide_labels, # Only show numbers if few classes
+                display_labels=None if hide_labels else clf.classes_
+            )
+            
+            # Force Colorbar text to be white
+            disp.im_.colorbar.ax.yaxis.set_tick_params(color=TEXT_MUTED, labelcolor=TEXT_MUTED)
+
+            # Clean up Axes
+            ax.set_title(f"Confusion Matrix: {algo}\n({n_classes} Classes)", color=TEXT_PRIMARY, fontsize=11, pad=10)
+            ax.set_xlabel("Predicted Label", color=ACCENT)
+            ax.set_ylabel("True Label", color=ACCENT)
+            
+            if hide_labels:
+                ax.set_xticks([]) # Remove messy ticks
+                ax.set_yticks([])
+            else:
+                ax.tick_params(axis='x', colors=TEXT_MUTED, rotation=45)
+                ax.tick_params(axis='y', colors=TEXT_MUTED)
+
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.spines['bottom'].set_color(TEXT_MUTED)
+            ax.spines['left'].set_color(TEXT_MUTED)
+
             plt.tight_layout()
-            plt.show()
-            self.log("[OK]   Confusion matrix displayed.")
+
+            # 4. SAVE to Public
+            if not os.path.exists("Public"): os.makedirs("Public")
+            save_path = f"Public/confusion_matrix_{algo.replace(' ', '_')}.png"
+            plt.savefig(save_path)
+            self.log(f"[FILE] Saved graph: {save_path}")
+
+            # 5. Show in UI
+            canvas = FigureCanvasTkAgg(fig, master=popup)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill="both", expand=True, padx=10, pady=10)
+
+            tk.Button(popup, text="CLOSE", font=("Courier New", 10, "bold"),
+                      bg=ACCENT2, fg="#000", bd=0, padx=20, pady=5,
+                      command=popup.destroy).pack(pady=10)
+
         except Exception as e:
             self.log(f"[ERR]  {e}")
             messagebox.showerror("Error", str(e))
+            popup.destroy()
 
     def _cmd_classification_report(self):
         if self.df is None:
@@ -886,45 +936,67 @@ class AutoDriveApp(tb.Window):
         if not target:
             messagebox.showerror("Error", "Select a target column.")
             return
+
         self.log(f"[INFO] Generating classification report for {algo}…")
+        
         try:
             from sklearn.model_selection import train_test_split
             from sklearn.metrics import classification_report
             from sklearn.tree import DecisionTreeClassifier
             from sklearn.naive_bayes import GaussianNB
             from sklearn.svm import SVC
+            import os
 
             X = self.df.drop(columns=[target])
             y = self.df[target]
             X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-            models = {
-                "Decision Tree": DecisionTreeClassifier(),
-                "Naive Bayes":   GaussianNB(),
-                "SVM":           SVC(),
-            }
+            models = { "Decision Tree": DecisionTreeClassifier(), "Naive Bayes": GaussianNB(), "SVM": SVC() }
             clf = models.get(algo, DecisionTreeClassifier())
             clf.fit(X_train, y_train)
+            
+            # Generate Report String
             report = classification_report(y_test, clf.predict(X_test))
 
-            # ── Pop-up window ──────────────────────────────────────
+            # ── SAVE TO PUBLIC ──
+            if not os.path.exists("Public"): os.makedirs("Public")
+            filename = f"classification_report_{algo.replace(' ', '_')}.txt"
+            save_path = os.path.join("Public", filename)
+            
+            with open(save_path, "w") as f:
+                f.write(f"ALGORITHM: {algo}\n")
+                f.write(f"TARGET: {target}\n")
+                f.write("-" * 60 + "\n")
+                f.write(report)
+            
+            self.log(f"[FILE] Saved report: {save_path}")
+
+            # ── POP-UP WINDOW ──
             win = tk.Toplevel(self)
             win.title(f"Classification Report — {algo}")
             win.configure(bg=LOG_BG)
-            win.geometry("560x400")
+            win.geometry("600x500")
             win.resizable(True, True)
 
             tk.Label(win, text=f"Classification Report  ·  {algo}",
                      font=("Courier New", 10, "bold"), fg=ACCENT, bg=LOG_BG
                      ).pack(anchor="w", padx=16, pady=(14, 6))
+            
+            tk.Label(win, text=f"Saved to: {save_path}",
+                     font=("Courier New", 8), fg=TEXT_MUTED, bg=LOG_BG
+                     ).pack(anchor="w", padx=16, pady=(0, 10))
 
             txt = tk.Text(win, bg=LOG_BG, fg="#7ec8a0", font=("Courier New", 9),
                           bd=0, wrap="none", state="normal")
             txt.insert("1.0", report)
             txt.config(state="disabled")
+            
+            # Add scrollbar for long reports
+            scroll = tk.Scrollbar(win, command=txt.yview, bg=LOG_BG, bd=0)
+            txt.config(yscrollcommand=scroll.set)
+            scroll.pack(side="right", fill="y", pady=(0,16))
             txt.pack(fill="both", expand=True, padx=16, pady=(0, 16))
 
-            self.log("[OK]   Classification report displayed.")
         except Exception as e:
             self.log(f"[ERR]  {e}")
             messagebox.showerror("Error", str(e))
