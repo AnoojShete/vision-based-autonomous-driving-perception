@@ -42,6 +42,11 @@ except ImportError:
     def run_advanced_pipeline(path): raise NotImplementedError("dl_module not available")
     def detect_pedestrians(path): raise NotImplementedError("dl_module not available")
 
+try:
+    from PIL import Image, ImageTk
+    PIL_OK = True
+except ImportError:
+    PIL_OK = False
 
 # ─────────────────────────────────────────
 # COLOUR & STYLE CONSTANTS
@@ -352,6 +357,7 @@ class AutoDriveApp(tb.Window):
 
         vision_btns = [
             ("🛑  Traffic Sign Recognition", ACCENT2,   self._cmd_traffic_sign),
+            ("📈  View Training History",     "#2d3436", self._cmd_view_training_graph),
             ("🚶  Pedestrian Detection",      ACCENT3,   self._cmd_pedestrian),
             ("🛣️  Lane Detection (Basic)",    "#a78bfa", self._cmd_lane),
             ("🚀  Full Autonomous Pipeline",  ACCENT,    self._cmd_full_pipeline),
@@ -1000,3 +1006,44 @@ class AutoDriveApp(tb.Window):
         except Exception as e:
             self.log(f"[ERR]  {e}")
             messagebox.showerror("Error", str(e))
+    
+    def _cmd_view_training_graph(self):
+        import os
+        # 1. Check locations (Root or Public folder)
+        possible_paths = [
+            "Public/training_graphs.png",
+            "training_graphs.png"
+        ]
+        found_path = None
+        for p in possible_paths:
+            if os.path.exists(p):
+                found_path = p
+                break
+        
+        if not found_path:
+            messagebox.showerror("Error", "Graph not found.\nRun 'train_traffic_sign.py' first to generate it.")
+            return
+
+        self.log(f"[INFO] Opening training graph: {found_path}")
+
+        # 2. Open Popup
+        popup = tk.Toplevel(self)
+        popup.title("Deep Learning Training History")
+        popup.geometry("1000x500")
+        popup.configure(bg=CARD_BG)
+
+        # 3. Load & Resize Image
+        if PIL_OK:
+            img = Image.open(found_path)
+            # Resize to fit the popup (keep aspect ratio approximately)
+            img = img.resize((980, 480), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
+            
+            lbl = tk.Label(popup, image=photo, bg=CARD_BG)
+            lbl.image = photo # Keep reference!
+            lbl.pack(expand=True, fill="both")
+        else:
+            # Fallback if Pillow not installed (rare)
+            lbl = tk.Label(popup, text="Pillow (PIL) library missing.\nCannot resize image.", 
+                           fg=ACCENT2, bg=CARD_BG)
+            lbl.pack(expand=True)

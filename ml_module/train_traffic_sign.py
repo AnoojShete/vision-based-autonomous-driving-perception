@@ -111,8 +111,9 @@ def plot_history(history):
     plt.legend()
     plt.grid(True)
     
-    plt.savefig('training_graphs.png')
-    print("✅ Graphs Saved as 'training_graphs.png'")
+    # Check if Public exists, if not create it
+    if not os.path.exists("Public"): os.makedirs("Public")
+    plt.savefig('Public/training_graphs.png')
 
 def main():
     # Step 1 & 2: Load & Preprocess
