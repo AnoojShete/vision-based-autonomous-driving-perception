@@ -1,4 +1,5 @@
-from gui.app import launch_app
+from gui.app import AutoDriveApp
 
 if __name__ == "__main__":
-    launch_app()
+    app = AutoDriveApp()
+    app.mainloop()

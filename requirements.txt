@@ -1,0 +1,9 @@
+opencv-python
+numpy
+pandas
+ttkbootstrap
+ultralytics
+tensorflow
+scikit-learn
+matplotlib
+seaborn
