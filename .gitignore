@@ -12,12 +12,13 @@ env/
 data/
 
 # Models
+models/
+weights/
 models/*.h5
 models/*.pt
 models/*.pth
+*.pt
 
 # OS
 .DS_Store
 Thumbs.db
-
-*.pt
