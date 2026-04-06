@@ -651,7 +651,7 @@ class AutoDriveApp(tb.Window):
         self._flat_btn(report_frame, "📉  Confusion Matrix", ACCENT2, self._cmd_confusion_matrix).pack(fill="x", pady=5, ipadx=6, ipady=5)
         self._flat_btn(report_frame, "📄  Classification Report", "#5c6370", self._cmd_classification_report).pack(fill="x", pady=5, ipadx=6, ipady=5)
 
-        shell5, body5 = self._make_card(pipeline, "STEP 05 (OPTIONAL)", "ADVANCED CSV SANDBOX", "#4f5d75")
+        shell5, body5 = self._make_card(pipeline, "STEP 05", "CSV DATASET LAB", "#4f5d75")
         shell5.pack(**PAD)
         tk.Label(
             body5,
@@ -706,7 +706,7 @@ class AutoDriveApp(tb.Window):
         self._flat_btn(adv_actions, "📉  CM", "#6c7a89", self._cmd_adv_confusion_matrix).pack(side="left", padx=8)
         self._flat_btn(adv_actions, "📄  Report", "#6c7a89", self._cmd_adv_classification_report).pack(side="left", padx=8)
 
-        self._adv_status_var = tk.StringVar(value="Advanced sandbox idle.")
+        self._adv_status_var = tk.StringVar(value="CSV dataset lab ready.")
         tk.Label(body5, textvariable=self._adv_status_var, font=("Courier New", 9), fg=TEXT_PRIMARY, bg=CARD_BG).pack(anchor="w", pady=(6, 0))
 
         return view
@@ -891,14 +891,14 @@ class AutoDriveApp(tb.Window):
             self._adv_dataset_label.config(text=f"{short}  ({len(self._adv_df):,} rows)", fg=TEXT_PRIMARY)
             self._adv_status_var.set("CSV imported. Choose target and algorithm.")
             self._last_adv_result = None
-            self.log(f"[OK]   Advanced CSV loaded '{short}'")
+            self.log(f"[OK]   CSV dataset loaded '{short}'")
         except Exception as e:
             self.log(f"[ERR]  {e}")
             messagebox.showerror("Error", str(e))
 
     def _cmd_adv_preprocess(self):
         if self._adv_df is None:
-            messagebox.showerror("Error", "Import a CSV first in Advanced Sandbox.")
+            messagebox.showerror("Error", "Import a CSV first in Dataset Lab.")
             return
 
         def run():
@@ -918,7 +918,7 @@ class AutoDriveApp(tb.Window):
                         f"Preprocess complete. Null cells fixed: {nulls_before}."
                     ),
                 )
-                self.log(f"[OK]   Advanced preprocess complete (nulls fixed: {nulls_before})")
+                self.log(f"[OK]   Dataset preprocess complete (nulls fixed: {nulls_before})")
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Error", str(e)))
 
@@ -926,7 +926,7 @@ class AutoDriveApp(tb.Window):
 
     def _cmd_adv_train(self):
         if self._adv_df is None:
-            messagebox.showerror("Error", "Import a CSV first in Advanced Sandbox.")
+            messagebox.showerror("Error", "Import a CSV first in Dataset Lab.")
             return
         target = self._adv_target_var.get()
         algo = self._adv_algo_var.get()
@@ -934,14 +934,14 @@ class AutoDriveApp(tb.Window):
             messagebox.showerror("Error", "Select a target column.")
             return
 
-        self._adv_status_var.set("Training advanced model...")
+        self._adv_status_var.set("Training model...")
 
         def run():
             try:
                 acc = train_model(self._adv_df.copy(), target, algo)
                 self._last_adv_result = {"target": target, "algorithm": algo, "accuracy": acc}
-                self.after(0, lambda: self._adv_status_var.set(f"Advanced model trained. Accuracy: {acc:.1%}"))
-                self.log(f"[OK]   Advanced {algo} Accuracy: {acc:.4f}")
+                self.after(0, lambda: self._adv_status_var.set(f"Model trained. Accuracy: {acc:.1%}"))
+                self.log(f"[OK]   Dataset {algo} Accuracy: {acc:.4f}")
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Error", str(e)))
 
@@ -949,7 +949,7 @@ class AutoDriveApp(tb.Window):
 
     def _cmd_adv_confusion_matrix(self):
         if self._adv_df is None:
-            messagebox.showerror("Error", "Import a CSV first in Advanced Sandbox.")
+            messagebox.showerror("Error", "Import a CSV first in Dataset Lab.")
             return
         target = self._adv_target_var.get()
         algo = self._adv_algo_var.get()
@@ -999,11 +999,11 @@ class AutoDriveApp(tb.Window):
                 cmap="Blues",
                 include_values=False,
             )
-            ax.set_title(f"Advanced CM: {algo}", color=TEXT_PRIMARY)
+            ax.set_title(f"Dataset Confusion Matrix: {algo}", color=TEXT_PRIMARY)
             if not os.path.exists("Public"):
                 os.makedirs("Public")
             safe_algo = algo.replace(" ", "_")
-            save_path = f"Public/advanced_confusion_matrix_{safe_algo}.png"
+            save_path = f"Public/dataset_confusion_matrix_{safe_algo}.png"
             plt.savefig(save_path)
 
             popup = tk.Toplevel(self)
@@ -1012,13 +1012,13 @@ class AutoDriveApp(tb.Window):
             canvas = FigureCanvasTkAgg(fig, master=popup)
             canvas.draw()
             canvas.get_tk_widget().pack(fill="both", expand=True)
-            self._adv_status_var.set(f"Advanced confusion matrix saved: {save_path}")
+            self._adv_status_var.set(f"Confusion matrix saved: {save_path}")
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
     def _cmd_adv_classification_report(self):
         if self._adv_df is None:
-            messagebox.showerror("Error", "Import a CSV first in Advanced Sandbox.")
+            messagebox.showerror("Error", "Import a CSV first in Dataset Lab.")
             return
         target = self._adv_target_var.get()
         algo = self._adv_algo_var.get()
@@ -1058,17 +1058,17 @@ class AutoDriveApp(tb.Window):
             if not os.path.exists("Public"):
                 os.makedirs("Public")
             safe_algo = algo.replace(" ", "_")
-            save_path = f"Public/advanced_report_{safe_algo}.txt"
+            save_path = f"Public/dataset_report_{safe_algo}.txt"
             with open(save_path, "w", encoding="utf-8") as handle:
                 handle.write(report)
 
             win = tk.Toplevel(self)
-            win.title("Advanced Classification Report")
+            win.title("Dataset Classification Report")
             win.configure(bg=LOG_BG)
             txt = tk.Text(win, bg=LOG_BG, fg="#7ec8a0", font=("Courier New", 9))
             txt.insert("1.0", report)
             txt.pack(fill="both", expand=True)
-            self._adv_status_var.set(f"Advanced report saved: {save_path}")
+            self._adv_status_var.set(f"Classification report saved: {save_path}")
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
