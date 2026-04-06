@@ -28,10 +28,14 @@ except ImportError:
     PIL_OK = False
 
 try:
-    from ml_module.train import train_model
+    from ml_module.train import get_driving_dataset_summary, train_driving_model, train_model
     ML_OK = True
 except ImportError:
     ML_OK = False
+    def get_driving_dataset_summary(task="metadata", data_dir="data", max_samples=5000):
+        raise NotImplementedError("ml_module not available")
+    def train_driving_model(task="metadata", algorithm="Decision Tree", data_dir="data", test_size=0.2, random_state=42, max_samples=5000):
+        raise NotImplementedError("ml_module not available")
     def train_model(df, target, algo):
         raise NotImplementedError("ml_module not available")
 
@@ -84,6 +88,11 @@ class AutoDriveApp(tb.Window):
         self.configure(bg=SIDEBAR_BG)
 
         self.df            = None
+        self._adv_df       = None
+        self._adv_loaded_name = ""
+        self._driving_task = tk.StringVar(value="metadata")
+        self._last_driving_result = None
+        self._last_adv_result = None
         self._active_nav   = tk.StringVar(value="dashboard")
 
         if not os.path.exists("Public"):
@@ -557,10 +566,10 @@ class AutoDriveApp(tb.Window):
     # ─────────────────────────────────────────
     def _build_datalab_view(self, parent):
         view = tk.Frame(parent, bg=CONTENT_BG)
-        tk.Label(view, text="📊  Data Lab",
+        tk.Label(view, text="📊  Driving ML Lab",
                  font=FONT_HEADING, fg=TEXT_PRIMARY, bg=CONTENT_BG
                  ).pack(anchor="w", padx=30, pady=(24, 2))
-        tk.Label(view, text="4-step machine learning pipeline — Load → Preprocess → Train → Evaluate.",
+        tk.Label(view, text="Traffic-sign analytics pipeline — Select task → Prepare features → Train → Evaluate.",
                  font=FONT_SUB, fg=TEXT_MUTED, bg=CONTENT_BG
                  ).pack(anchor="w", padx=32, pady=(0, 14))
 
@@ -586,22 +595,32 @@ class AutoDriveApp(tb.Window):
 
         PAD = dict(padx=30, pady=8, fill="x")
 
-        shell1, body1 = self._make_card(pipeline, "STEP 01", "DATA INGESTION", ACCENT)
+        shell1, body1 = self._make_card(pipeline, "STEP 01", "TASK + DATA SOURCE", ACCENT)
         shell1.pack(**PAD)
+        tk.Label(body1, text="DRIVING TASK", font=("Courier New", 8, "bold"), fg=ACCENT, bg=CARD_BG).pack(anchor="w", pady=(2, 4))
+        self._task_combo = tb.Combobox(
+            body1,
+            textvariable=self._driving_task,
+            values=["metadata", "robustness"],
+            width=28,
+            bootstyle="info",
+            state="readonly",
+        )
+        self._task_combo.pack(anchor="w", pady=(0, 8))
         file_row = tk.Frame(body1, bg=CARD_BG)
         file_row.pack(fill="x", pady=(4, 6))
-        self._dataset_label = tk.Label(file_row, text="No file loaded.", font=FONT_LABEL, fg=TEXT_MUTED, bg=CARD_BG, width=42, anchor="w")
+        self._dataset_label = tk.Label(file_row, text="No driving dataset loaded.", font=FONT_LABEL, fg=TEXT_MUTED, bg=CARD_BG, width=42, anchor="w")
         self._dataset_label.pack(side="left")
-        self._flat_btn(file_row, "📂  Browse CSV", ACCENT, self._cmd_load_csv).pack(side="left", padx=10)
+        self._flat_btn(file_row, "📂  Load Driving Data", ACCENT, self._cmd_load_csv).pack(side="left", padx=10)
         self._ingest_stats = tk.Label(body1, text="", font=("Courier New", 8), fg=ACCENT, bg=CARD_BG, anchor="w")
         self._ingest_stats.pack(anchor="w", pady=(0, 4))
 
-        shell2, body2 = self._make_card(pipeline, "STEP 02", "PREPROCESSING", "#a78bfa")
+        shell2, body2 = self._make_card(pipeline, "STEP 02", "FEATURE PREP", "#a78bfa")
         shell2.pack(**PAD)
-        tk.Label(body2, text="Handle missing values, encode labels & normalise features.", font=FONT_LABEL, fg=TEXT_MUTED, bg=CARD_BG).pack(anchor="w", pady=(4, 8))
+        tk.Label(body2, text="Build traffic-sign features and validate schema for the selected task.", font=FONT_LABEL, fg=TEXT_MUTED, bg=CARD_BG).pack(anchor="w", pady=(4, 8))
         pre_row = tk.Frame(body2, bg=CARD_BG)
         pre_row.pack(fill="x")
-        self._flat_btn(pre_row, "⚙️  Run Preprocessing", "#a78bfa", self._cmd_preprocess).pack(side="left")
+        self._flat_btn(pre_row, "⚙️  Prepare Features", "#a78bfa", self._cmd_preprocess).pack(side="left")
         self._preprocess_status = tk.Label(pre_row, text="  ○  Pending", font=("Courier New", 9), fg=TEXT_MUTED, bg=CARD_BG)
         self._preprocess_status.pack(side="left", padx=16)
 
@@ -611,15 +630,11 @@ class AutoDriveApp(tb.Window):
         train_left.pack(side="left", fill="x", expand=True)
         train_right = tk.Frame(body3, bg=CARD_BG)
         train_right.pack(side="right", anchor="s", padx=(20, 0))
-        tk.Label(train_left, text="TARGET COLUMN", font=("Courier New", 8, "bold"), fg=ACCENT3, bg=CARD_BG).grid(row=0, column=0, sticky="w", pady=(4, 4))
-        self._col_var   = tk.StringVar()
-        self._col_combo = tb.Combobox(train_left, textvariable=self._col_var, width=28, bootstyle="warning", state="readonly")
-        self._col_combo.grid(row=1, column=0, sticky="w", pady=(0, 10))
-        tk.Label(train_left, text="ALGORITHM", font=("Courier New", 8, "bold"), fg=ACCENT3, bg=CARD_BG).grid(row=2, column=0, sticky="w", pady=(0, 4))
+        tk.Label(train_left, text="ALGORITHM", font=("Courier New", 8, "bold"), fg=ACCENT3, bg=CARD_BG).grid(row=0, column=0, sticky="w", pady=(4, 4))
         self._algo_var = tk.StringVar(value="Decision Tree")
-        tb.Combobox(train_left, textvariable=self._algo_var, values=["Decision Tree", "Naive Bayes", "SVM"], width=28, bootstyle="warning", state="readonly").grid(row=3, column=0, sticky="w", pady=(0, 8))
+        tb.Combobox(train_left, textvariable=self._algo_var, values=["Decision Tree", "Naive Bayes", "SVM", "Random Forest"], width=28, bootstyle="warning", state="readonly").grid(row=1, column=0, sticky="w", pady=(0, 8))
         self._train_progress = tb.Progressbar(train_left, bootstyle="warning-striped", mode="indeterminate", length=220)
-        self._train_progress.grid(row=4, column=0, sticky="w", pady=(4, 4))
+        self._train_progress.grid(row=2, column=0, sticky="w", pady=(4, 4))
         self._flat_btn(train_right, "🚀  TRAIN MODEL", ACCENT3, self._cmd_train).pack(ipadx=10, ipady=8)
 
         shell4, body4 = self._make_card(pipeline, "STEP 04", "EVALUATION", ACCENT2)
@@ -629,10 +644,70 @@ class AutoDriveApp(tb.Window):
         tk.Label(acc_frame, text="ACCURACY", font=("Courier New", 8, "bold"), fg=ACCENT2, bg=CARD_BG).pack(anchor="w")
         self._result_var = tk.StringVar(value="--%")
         tk.Label(acc_frame, textvariable=self._result_var, font=("Courier New", 30, "bold"), fg=ACCENT3, bg=CARD_BG).pack(anchor="w")
+        self._runtime_var = tk.StringVar(value="Runtime: --")
+        tk.Label(acc_frame, textvariable=self._runtime_var, font=("Courier New", 9), fg=TEXT_PRIMARY, bg=CARD_BG).pack(anchor="w", pady=(2, 0))
         report_frame = tk.Frame(body4, bg=CARD_BG)
         report_frame.pack(side="left", anchor="center")
         self._flat_btn(report_frame, "📉  Confusion Matrix", ACCENT2, self._cmd_confusion_matrix).pack(fill="x", pady=5, ipadx=6, ipady=5)
         self._flat_btn(report_frame, "📄  Classification Report", "#5c6370", self._cmd_classification_report).pack(fill="x", pady=5, ipadx=6, ipady=5)
+
+        shell5, body5 = self._make_card(pipeline, "STEP 05 (OPTIONAL)", "ADVANCED CSV SANDBOX", "#4f5d75")
+        shell5.pack(**PAD)
+        tk.Label(
+            body5,
+            text="Use generic CSV training for experimentation. Driving workflow above remains the default path.",
+            font=FONT_LABEL,
+            fg=TEXT_MUTED,
+            bg=CARD_BG,
+            justify="left",
+        ).pack(anchor="w", pady=(2, 8))
+
+        adv_top = tk.Frame(body5, bg=CARD_BG)
+        adv_top.pack(fill="x", pady=(0, 6))
+        self._adv_dataset_label = tk.Label(
+            adv_top,
+            text="No CSV imported.",
+            font=FONT_LABEL,
+            fg=TEXT_MUTED,
+            bg=CARD_BG,
+            width=42,
+            anchor="w",
+        )
+        self._adv_dataset_label.pack(side="left")
+        self._flat_btn(adv_top, "📂  Import CSV", "#4f5d75", self._cmd_adv_import_csv).pack(side="left", padx=10)
+
+        adv_mid = tk.Frame(body5, bg=CARD_BG)
+        adv_mid.pack(fill="x", pady=(4, 6))
+        tk.Label(adv_mid, text="TARGET", font=("Courier New", 8, "bold"), fg="#9fb3c8", bg=CARD_BG).grid(row=0, column=0, sticky="w")
+        self._adv_target_var = tk.StringVar()
+        self._adv_target_combo = tb.Combobox(
+            adv_mid,
+            textvariable=self._adv_target_var,
+            width=24,
+            bootstyle="secondary",
+            state="readonly",
+        )
+        self._adv_target_combo.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        tk.Label(adv_mid, text="ALGORITHM", font=("Courier New", 8, "bold"), fg="#9fb3c8", bg=CARD_BG).grid(row=0, column=1, sticky="w", padx=(20, 0))
+        self._adv_algo_var = tk.StringVar(value="Decision Tree")
+        tb.Combobox(
+            adv_mid,
+            textvariable=self._adv_algo_var,
+            values=["Decision Tree", "Naive Bayes", "SVM", "Random Forest"],
+            width=24,
+            bootstyle="secondary",
+            state="readonly",
+        ).grid(row=1, column=1, sticky="w", padx=(20, 0), pady=(2, 0))
+
+        adv_actions = tk.Frame(body5, bg=CARD_BG)
+        adv_actions.pack(fill="x", pady=(6, 2))
+        self._flat_btn(adv_actions, "⚙️  Preprocess", "#6c7a89", self._cmd_adv_preprocess).pack(side="left")
+        self._flat_btn(adv_actions, "🚀  Train", "#6c7a89", self._cmd_adv_train).pack(side="left", padx=8)
+        self._flat_btn(adv_actions, "📉  CM", "#6c7a89", self._cmd_adv_confusion_matrix).pack(side="left", padx=8)
+        self._flat_btn(adv_actions, "📄  Report", "#6c7a89", self._cmd_adv_classification_report).pack(side="left", padx=8)
+
+        self._adv_status_var = tk.StringVar(value="Advanced sandbox idle.")
+        tk.Label(body5, textvariable=self._adv_status_var, font=("Courier New", 9), fg=TEXT_PRIMARY, bg=CARD_BG).pack(anchor="w", pady=(6, 0))
 
         return view
 
@@ -660,51 +735,40 @@ class AutoDriveApp(tb.Window):
         return btn
 
     def _cmd_load_csv(self):
-        if not PANDAS_OK:
-            messagebox.showerror("Error", "pandas is not installed.")
-            return
-        import pandas as pd
-        file = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
-        if not file: return
+        task = self._driving_task.get().strip().lower()
         try:
-            self.df = pd.read_csv(file)
-            cols = list(self.df.columns)
-            self._col_combo["values"] = cols
-            self._col_combo.current(0)
-            short = file.replace("\\", "/").split("/")[-1]
-            self._dataset_label.config(text=f"{short}  ({len(self.df):,} rows)", fg=TEXT_PRIMARY)
-            self._ingest_stats.config(text=f"Columns: {len(cols)}    |    Null cells: {int(self.df.isnull().sum().sum())}")
+            summary = get_driving_dataset_summary(task=task, data_dir="data", max_samples=5000)
+            self.df = summary
+            self._dataset_label.config(text=f"Task: {task}  ({summary['samples']:,} samples)", fg=TEXT_PRIMARY)
+            self._ingest_stats.config(
+                text=f"Features: {summary['features']}    |    Classes: {summary['classes']}"
+            )
             self._preprocess_status.config(text="  ○  Pending", fg=TEXT_MUTED)
             self._result_var.set("--%")
-            self.log(f"[OK]   Loaded '{short}'")
+            self._runtime_var.set("Runtime: --")
+            self._last_driving_result = None
+            self.log(f"[OK]   Loaded driving task '{task}'")
         except Exception as e:
             self.log(f"[ERR]  {e}")
             messagebox.showerror("Error", str(e))
 
     def _cmd_preprocess(self):
         if self.df is None:
-            messagebox.showerror("Error", "Load a CSV dataset first.")
+            messagebox.showerror("Error", "Load a driving task first.")
             return
         self._preprocess_status.config(text="  ◌  Running…", fg=ACCENT3)
         self.update()
+
         def run():
             try:
-                import pandas as pd
-                n_before = int(self.df.isnull().sum().sum())
-                for col in self.df.select_dtypes(include=["number"]).columns:
-                    self.df[col].fillna(self.df[col].median(), inplace=True)
-                for col in self.df.select_dtypes(include=["object"]).columns:
-                    self.df[col].fillna(self.df[col].mode()[0] if not self.df[col].mode().empty else "Unknown", inplace=True)
-                
-                from sklearn.preprocessing import LabelEncoder
-                enc_cols = []
-                for col in self.df.select_dtypes(include=["object"]).columns:
-                    self.df[col] = LabelEncoder().fit_transform(self.df[col].astype(str))
-                    enc_cols.append(col)
-                
-                self.after(0, lambda: self._preprocess_done(f"Nulls fixed: {n_before}, Encoded: {len(enc_cols)}"))
+                task = self._driving_task.get().strip().lower()
+                summary = get_driving_dataset_summary(task=task, data_dir="data", max_samples=5000)
+                self.df = summary
+                text = f"Task={task}, Samples={summary['samples']}, Features={summary['features']}"
+                self.after(0, lambda: self._preprocess_done(text))
             except Exception as e:
                 self.after(0, lambda: self._preprocess_fail(str(e)))
+
         threading.Thread(target=run, daemon=True).start()
 
     def _preprocess_done(self, summary):
@@ -717,112 +781,294 @@ class AutoDriveApp(tb.Window):
 
     def _cmd_train(self):
         if self.df is None:
-            messagebox.showerror("Error", "Load a CSV dataset first.")
+            messagebox.showerror("Error", "Load a driving task first.")
             return
-        target = self._col_var.get()
-        algo   = self._algo_var.get()
-        if not target:
-            messagebox.showerror("Error", "Select a target column.")
-            return
+        task = self._driving_task.get().strip().lower()
+        algo = self._algo_var.get()
         self.log(f"[INFO] Training {algo}…")
         self._result_var.set("…")
+        self._runtime_var.set("Runtime: measuring...")
         self._train_progress.start(12)
         self.update()
+
         def run():
             try:
-                acc = train_model(self.df, target, algo)
-                self.after(0, lambda: self._train_done(acc, algo))
+                result = train_driving_model(task=task, algorithm=algo, data_dir="data", test_size=0.2, max_samples=5000)
+                self.after(0, lambda: self._train_done(result))
             except Exception as e:
                 self.after(0, lambda: self._train_error(str(e)))
+
         threading.Thread(target=run, daemon=True).start()
 
-    def _train_done(self, acc, algo):
+    def _train_done(self, result):
         self._train_progress.stop()
-        self._result_var.set(f"{acc:.1%}")
-        self.log(f"[OK]   {algo} Accuracy: {acc:.4f}")
+        self._last_driving_result = result
+        self._result_var.set(f"{result['accuracy']:.1%}")
+        self._runtime_var.set(
+            f"Runtime: train {result['train_seconds']:.2f}s | infer {result['ms_per_sample']:.2f} ms/sample"
+        )
+        self.log(
+            f"[OK]   {result['algorithm']} ({result['task']}) Acc={result['accuracy']:.4f}, "
+            f"F1w={result['f1_weighted']:.4f}"
+        )
 
     def _train_error(self, msg):
         self._train_progress.stop()
         self._result_var.set("Err")
+        self._runtime_var.set("Runtime: --")
         messagebox.showerror("Error", msg)
 
     def _cmd_confusion_matrix(self):
-        if self.df is None: return
-        target = self._col_var.get()
-        algo = self._algo_var.get()
-        popup = tk.Toplevel(self)
-        popup.geometry("750x600")
-        popup.configure(bg=CARD_BG)
+        if not self._last_driving_result:
+            messagebox.showinfo("Info", "Train a driving model first.")
+            return
+
+        matrix_path = self._last_driving_result.get("confusion_matrix_png_path")
+        if not matrix_path or not os.path.exists(matrix_path):
+            messagebox.showerror("Error", "Confusion matrix image not found.")
+            return
+
+        if not PIL_OK:
+            messagebox.showinfo("Confusion Matrix", f"Saved at: {matrix_path}")
+            return
+
+        try:
+            image = Image.open(matrix_path)
+            image.thumbnail((900, 640))
+            win = tk.Toplevel(self)
+            win.title("Confusion Matrix")
+            win.configure(bg=CARD_BG)
+            photo = ImageTk.PhotoImage(image)
+            label = tk.Label(win, image=photo, bg=CARD_BG)
+            label.image = photo
+            label.pack(fill="both", expand=True, padx=8, pady=8)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _cmd_classification_report(self):
+        if not self._last_driving_result:
+            messagebox.showinfo("Info", "Train a driving model first.")
+            return
+
+        report_path = self._last_driving_result.get("classification_report_path")
+        grouped_path = self._last_driving_result.get("grouped_error_report_path")
+        if not report_path or not os.path.exists(report_path):
+            messagebox.showerror("Error", "Classification report not found.")
+            return
+
+        try:
+            with open(report_path, "r", encoding="utf-8") as report_file:
+                report = report_file.read()
+
+            grouped_block = ""
+            if grouped_path and os.path.exists(grouped_path):
+                grouped_block = f"\n\nGrouped Error Report CSV:\n{grouped_path}\n"
+
+            win = tk.Toplevel(self)
+            win.title("Classification Report")
+            win.configure(bg=LOG_BG)
+            txt = tk.Text(win, bg=LOG_BG, fg="#7ec8a0", font=("Courier New", 9))
+            txt.insert("1.0", report + grouped_block)
+            txt.pack(fill="both", expand=True)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _cmd_adv_import_csv(self):
+        if not PANDAS_OK:
+            messagebox.showerror("Error", "pandas is not installed.")
+            return
+        file = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
+        if not file:
+            return
+        try:
+            self._adv_df = pd.read_csv(file)
+            cols = list(self._adv_df.columns)
+            self._adv_target_combo["values"] = cols
+            if cols:
+                self._adv_target_combo.current(0)
+            short = file.replace("\\", "/").split("/")[-1]
+            self._adv_loaded_name = short
+            self._adv_dataset_label.config(text=f"{short}  ({len(self._adv_df):,} rows)", fg=TEXT_PRIMARY)
+            self._adv_status_var.set("CSV imported. Choose target and algorithm.")
+            self._last_adv_result = None
+            self.log(f"[OK]   Advanced CSV loaded '{short}'")
+        except Exception as e:
+            self.log(f"[ERR]  {e}")
+            messagebox.showerror("Error", str(e))
+
+    def _cmd_adv_preprocess(self):
+        if self._adv_df is None:
+            messagebox.showerror("Error", "Import a CSV first in Advanced Sandbox.")
+            return
+
+        def run():
+            try:
+                work_df = self._adv_df.copy()
+                nulls_before = int(work_df.isnull().sum().sum())
+                for col in work_df.select_dtypes(include=["number"]).columns:
+                    work_df[col] = work_df[col].fillna(work_df[col].median())
+                for col in work_df.select_dtypes(include=["object"]).columns:
+                    mode_value = work_df[col].mode()[0] if not work_df[col].mode().empty else "Unknown"
+                    work_df[col] = work_df[col].fillna(mode_value)
+
+                self._adv_df = work_df
+                self.after(
+                    0,
+                    lambda: self._adv_status_var.set(
+                        f"Preprocess complete. Null cells fixed: {nulls_before}."
+                    ),
+                )
+                self.log(f"[OK]   Advanced preprocess complete (nulls fixed: {nulls_before})")
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Error", str(e)))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _cmd_adv_train(self):
+        if self._adv_df is None:
+            messagebox.showerror("Error", "Import a CSV first in Advanced Sandbox.")
+            return
+        target = self._adv_target_var.get()
+        algo = self._adv_algo_var.get()
+        if not target:
+            messagebox.showerror("Error", "Select a target column.")
+            return
+
+        self._adv_status_var.set("Training advanced model...")
+
+        def run():
+            try:
+                acc = train_model(self._adv_df.copy(), target, algo)
+                self._last_adv_result = {"target": target, "algorithm": algo, "accuracy": acc}
+                self.after(0, lambda: self._adv_status_var.set(f"Advanced model trained. Accuracy: {acc:.1%}"))
+                self.log(f"[OK]   Advanced {algo} Accuracy: {acc:.4f}")
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Error", str(e)))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _cmd_adv_confusion_matrix(self):
+        if self._adv_df is None:
+            messagebox.showerror("Error", "Import a CSV first in Advanced Sandbox.")
+            return
+        target = self._adv_target_var.get()
+        algo = self._adv_algo_var.get()
+        if not target:
+            messagebox.showerror("Error", "Select a target column.")
+            return
+
         try:
             import matplotlib.pyplot as plt
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-            from sklearn.model_selection import train_test_split
+            from sklearn.ensemble import RandomForestClassifier
             from sklearn.metrics import ConfusionMatrixDisplay
-            from sklearn.tree import DecisionTreeClassifier
+            from sklearn.model_selection import train_test_split
             from sklearn.naive_bayes import GaussianNB
+            from sklearn.preprocessing import LabelEncoder
             from sklearn.svm import SVC
-            
-            X = self.df.drop(columns=[target])
-            y = self.df[target]
+            from sklearn.tree import DecisionTreeClassifier
+
+            work_df = self._adv_df.copy().dropna(subset=[target])
+            X = work_df.drop(columns=[target]).copy()
+            y = work_df[target].copy()
+            X = X.fillna(0)
+            for col in X.select_dtypes(include=["object"]).columns:
+                X[col] = LabelEncoder().fit_transform(X[col].astype(str))
+            if y.dtype == "object":
+                y = LabelEncoder().fit_transform(y.astype(str))
+
             X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-            models = { "Decision Tree": DecisionTreeClassifier(), "Naive Bayes": GaussianNB(), "SVM": SVC() }
-            clf = models.get(algo, DecisionTreeClassifier())
+            models = {
+                "Decision Tree": DecisionTreeClassifier(random_state=42),
+                "Naive Bayes": GaussianNB(),
+                "SVM": SVC(),
+                "Random Forest": RandomForestClassifier(n_estimators=200, random_state=42),
+            }
+            clf = models.get(algo, DecisionTreeClassifier(random_state=42))
             clf.fit(X_train, y_train)
 
             fig, ax = plt.subplots(figsize=(6, 5))
             fig.patch.set_facecolor(CARD_BG)
             ax.set_facecolor(CONTENT_BG)
-            
-            n_classes = len(clf.classes_)
-            hide_labels = n_classes > 20
-            
-            ConfusionMatrixDisplay.from_estimator(clf, X_test, y_test, ax=ax, colorbar=True, cmap="Blues",
-                                                  include_values=not hide_labels, display_labels=None if hide_labels else clf.classes_)
-            ax.set_title(f"Confusion Matrix: {algo}", color=TEXT_PRIMARY)
-            ax.tick_params(colors=TEXT_MUTED)
-            ax.xaxis.label.set_color(ACCENT)
-            ax.yaxis.label.set_color(ACCENT)
-            ax.spines['top'].set_visible(False)
-            ax.spines['right'].set_visible(False)
-            ax.spines['bottom'].set_color(TEXT_MUTED)
-            ax.spines['left'].set_color(TEXT_MUTED)
-            
-            if not os.path.exists("Public"): os.makedirs("Public")
-            plt.savefig(f"Public/confusion_matrix_{algo}.png")
+            ConfusionMatrixDisplay.from_estimator(
+                clf,
+                X_test,
+                y_test,
+                ax=ax,
+                colorbar=True,
+                cmap="Blues",
+                include_values=False,
+            )
+            ax.set_title(f"Advanced CM: {algo}", color=TEXT_PRIMARY)
+            if not os.path.exists("Public"):
+                os.makedirs("Public")
+            safe_algo = algo.replace(" ", "_")
+            save_path = f"Public/advanced_confusion_matrix_{safe_algo}.png"
+            plt.savefig(save_path)
 
+            popup = tk.Toplevel(self)
+            popup.geometry("750x600")
+            popup.configure(bg=CARD_BG)
             canvas = FigureCanvasTkAgg(fig, master=popup)
             canvas.draw()
             canvas.get_tk_widget().pack(fill="both", expand=True)
+            self._adv_status_var.set(f"Advanced confusion matrix saved: {save_path}")
         except Exception as e:
-            popup.destroy()
             messagebox.showerror("Error", str(e))
 
-    def _cmd_classification_report(self):
-        if self.df is None: return
-        target = self._col_var.get()
-        algo = self._algo_var.get()
+    def _cmd_adv_classification_report(self):
+        if self._adv_df is None:
+            messagebox.showerror("Error", "Import a CSV first in Advanced Sandbox.")
+            return
+        target = self._adv_target_var.get()
+        algo = self._adv_algo_var.get()
+        if not target:
+            messagebox.showerror("Error", "Select a target column.")
+            return
+
         try:
-            from sklearn.model_selection import train_test_split
+            from sklearn.ensemble import RandomForestClassifier
             from sklearn.metrics import classification_report
-            from sklearn.tree import DecisionTreeClassifier
+            from sklearn.model_selection import train_test_split
             from sklearn.naive_bayes import GaussianNB
+            from sklearn.preprocessing import LabelEncoder
             from sklearn.svm import SVC
-            X = self.df.drop(columns=[target])
-            y = self.df[target]
+            from sklearn.tree import DecisionTreeClassifier
+
+            work_df = self._adv_df.copy().dropna(subset=[target])
+            X = work_df.drop(columns=[target]).copy()
+            y = work_df[target].copy()
+            X = X.fillna(0)
+            for col in X.select_dtypes(include=["object"]).columns:
+                X[col] = LabelEncoder().fit_transform(X[col].astype(str))
+            if y.dtype == "object":
+                y = LabelEncoder().fit_transform(y.astype(str))
+
             X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-            models = { "Decision Tree": DecisionTreeClassifier(), "Naive Bayes": GaussianNB(), "SVM": SVC() }
-            clf = models.get(algo, DecisionTreeClassifier())
+            models = {
+                "Decision Tree": DecisionTreeClassifier(random_state=42),
+                "Naive Bayes": GaussianNB(),
+                "SVM": SVC(),
+                "Random Forest": RandomForestClassifier(n_estimators=200, random_state=42),
+            }
+            clf = models.get(algo, DecisionTreeClassifier(random_state=42))
             clf.fit(X_train, y_train)
-            report = classification_report(y_test, clf.predict(X_test))
-            
-            if not os.path.exists("Public"): os.makedirs("Public")
-            with open(f"Public/report_{algo}.txt", "w") as f: f.write(report)
-            
+            report = classification_report(y_test, clf.predict(X_test), zero_division=0)
+
+            if not os.path.exists("Public"):
+                os.makedirs("Public")
+            safe_algo = algo.replace(" ", "_")
+            save_path = f"Public/advanced_report_{safe_algo}.txt"
+            with open(save_path, "w", encoding="utf-8") as handle:
+                handle.write(report)
+
             win = tk.Toplevel(self)
+            win.title("Advanced Classification Report")
             win.configure(bg=LOG_BG)
             txt = tk.Text(win, bg=LOG_BG, fg="#7ec8a0", font=("Courier New", 9))
             txt.insert("1.0", report)
             txt.pack(fill="both", expand=True)
+            self._adv_status_var.set(f"Advanced report saved: {save_path}")
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
