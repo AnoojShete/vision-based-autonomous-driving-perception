@@ -12,6 +12,8 @@ env/
 data/
 
 # Models
+models/
+weights/
 models/*.h5
 models/*.pt
 models/*.pth
@@ -35,7 +37,6 @@ Thumbs.db
 *.mov
 *.mkv
 *.mp3
-.txt
 *.log
 Public/
 classification_report.txt
