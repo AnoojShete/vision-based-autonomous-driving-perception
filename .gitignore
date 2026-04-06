@@ -40,3 +40,9 @@ Thumbs.db
 *.log
 Public/
 classification_report.txt
+
+# Distribution / Packaging
+dist/
+build/
+*.egg-info/
+*.spec
