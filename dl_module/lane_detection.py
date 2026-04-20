@@ -141,3 +141,27 @@ def detect_lanes_image(image_path):
     if image is None:
         raise ValueError(f"Could not read image: {image_path}")
     return detect_lanes(image)
+
+def detect_lanes_data(image):
+    lane_image = np.copy(image)
+
+    color_filtered = color_selection(lane_image)
+    edges = canny(color_filtered)
+    roi = region_of_interest(edges)
+
+    lines = cv2.HoughLinesP(
+        roi, 2, np.pi/180, 15,
+        np.array([]), minLineLength=40, maxLineGap=150
+    )
+
+    lanes = average_slope_intercept(lane_image, lines)
+
+    if lanes is None:
+        return {"left_lane": None, "right_lane": None}
+
+    left, right = lanes
+
+    return {
+        "left_lane": left,
+        "right_lane": right
+    }

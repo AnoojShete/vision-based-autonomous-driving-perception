@@ -54,23 +54,61 @@ except ImportError:
         raise NotImplementedError("ml_module not available")
 
 try:
-    from dl_module.traffic_sign.predict import predict_traffic_sign
-    from dl_module.lane_detection import detect_lanes_image as run_basic_lane
-    from dl_module.pipeline import run_advanced_pipeline, process_image, process_video, set_video_progress_callback
-    from dl_module.pedestrian_detection import detect_pedestrians
-    from ml_module.train_traffic_sign import start_training as train_cnn_demo
+    from dl_module.pipeline import process_frame
+
+    import cv2
+
+    def process_image(path):
+        img = cv2.imread(path)
+        if img is None:
+            raise ValueError("Invalid image")
+        return process_frame(img)
+
+    def process_video(input_path, output_path, progress_callback=None):
+        cap = cv2.VideoCapture(input_path)
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        processed_frames = 0
+
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = None
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            processed = process_frame(frame)
+
+            if out is None:
+                h, w, _ = processed.shape
+                out = cv2.VideoWriter(output_path, fourcc, 20, (w, h))
+
+            out.write(processed)
+
+            processed_frames += 1
+
+            if progress_callback:
+                progress_callback(processed_frames, total_frames)
+
+            print(f"Frame {processed_frames}/{total_frames}")
+
+        cap.release()
+        if out:
+            out.release()
+
+        return output_path
+
     DL_OK = True
-except ImportError:
+
+except ImportError as e:
     DL_OK = False
-    def predict_traffic_sign(path): raise NotImplementedError("dl_module not available")
-    def run_basic_lane(path): raise NotImplementedError("dl_module not available")
-    def run_advanced_pipeline(path): raise NotImplementedError("dl_module not available")
-    def process_image(path): raise NotImplementedError("dl_module not available")
-    def process_video(input_path, output_path): raise NotImplementedError("dl_module not available")
-    def set_video_progress_callback(callback):
-        return None
-    def detect_pedestrians(path): raise NotImplementedError("dl_module not available")
-    def train_cnn_demo(data_path, limit, epochs, log_func): raise NotImplementedError("ml_module not available")
+    print("IMPORT ERROR:", e)
+
+    def process_image(path):
+        raise NotImplementedError("dl_module not available")
+    def process_video(input_path, output_path, progress_callback=None):
+        raise NotImplementedError("dl_module not available")
 
 
 # ─────────────────────────────────────────
@@ -1644,68 +1682,54 @@ class AutoDriveApp(tb.Window):
     def _cmd_full_pipeline(self):
         if self._pipeline_running:
             return
-        file = self._vision_input_path
-        if not file:
-            self._cmd_upload_vision_image()
-            file = self._vision_input_path
-        if not file:
+
+        input_path = self._vision_input_path
+        if not input_path:
+            messagebox.showwarning("No Input", "Please upload an image or video first.")
             return
 
         selected = self._selected_modules()
-        if not selected:
-            messagebox.showinfo("Modules", "Select at least one module before running.")
-            return
-
-        self.log(f"[INFO] Running pipeline on: {file}")
+        self.log(f"[INFO] Running pipeline on: {input_path}")
         self.log(f"[INFO] Modules: {', '.join(selected)}")
+
         self._set_pipeline_running(True)
-        is_video = self._is_video_file(file)
 
         def run():
             try:
-                if is_video:
-                    output_path = self._build_video_output_path(file)
+                if self._is_video_file(input_path):
+                    output_path = self._build_video_output_path(input_path)
+
+                    # 🔥 IMPORTANT
                     self.after(0, self._prepare_video_progress_ui)
 
-                    def _progress(done, total):
-                        self.after(0, lambda d=done, t=total: self._update_video_progress(d, t))
-
-                    set_video_progress_callback(_progress)
-                    status = process_video(file, output_path)
-                    set_video_progress_callback(None)
-
-                    if not str(status).startswith("OK:"):
-                        raise RuntimeError(status)
-
-                    self.after(
-                        0,
-                        lambda s=status, out=output_path, mods=list(selected), src=file:
-                        self._pipeline_video_done(s, out, mods, src),
+                    result = process_video(
+                        input_path,
+                        output_path,
+                        progress_callback=self._update_video_progress
                     )
-                    return
 
-                confidence = None
-                if len(selected) == 1 and selected[0] == "lane":
-                    result = run_basic_lane(file)
-                    result_img = result[0] if isinstance(result, (tuple, list)) else result
-                    status = "Lane detection complete"
-                elif len(selected) == 1 and selected[0] == "pedestrian":
-                    result_img, status = detect_pedestrians(file)
-                    confidence = self._extract_confidence(status)
-                elif len(selected) == 1 and selected[0] == "traffic":
-                    sign = predict_traffic_sign(file)
-                    label, confidence = self._normalize_traffic_sign_result(sign)
-                    result_img = None
-                    status = f"Traffic sign detected: {label}"
+                    # ✅ VIDEO SUCCESS
+                    if isinstance(result, str) and os.path.exists(result):
+                        self.after(0, self._pipeline_video_done,
+                                "Video Processed", result, selected, input_path)
+                    else:
+                        raise ValueError("Invalid video output")
+
                 else:
-                    result_img, status = process_image(file)
-                    confidence = self._extract_confidence(status)
-                self.after(0, lambda img=result_img, st=status, mods=list(selected), conf=confidence, src=file: self._pipeline_done(img, st, mods, conf, src))
+                    result = process_image(input_path)
+
+                    # ✅ IMAGE SUCCESS
+                    if hasattr(result, "shape"):
+                        self.after(0, self._pipeline_image_done,
+                                result, selected, input_path)
+                    else:
+                        raise ValueError("Invalid image output")
+
             except Exception as e:
-                set_video_progress_callback(None)
-                err_msg = str(e)
-                self.after(0, lambda msg=err_msg, mods=list(selected), src=file: self._pipeline_error(msg, mods, src))
+                self.after(0, self._pipeline_failed, str(e))
+
         threading.Thread(target=run, daemon=True).start()
+
 
     def _pipeline_done(self, result_img, status, selected, confidence, source_file):
         self._set_pipeline_running(False)
@@ -1768,6 +1792,23 @@ class AutoDriveApp(tb.Window):
             }
         )
         messagebox.showerror("Error", msg)
+
+    def _pipeline_failed(self, error_msg):
+        self._set_pipeline_running(False)
+        self._pipeline_status_var.set("Status: Failed")
+
+        self._result_text.config(state="normal")
+        self._result_text.delete("1.0", "end")
+        self._result_text.insert("end", f"Pipeline Failed\nError:\n{error_msg}")
+        self._result_text.config(state="disabled")
+
+        self.log(f"[ERR] {error_msg}")
+
+        self._append_pipeline_history({
+            "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+            "status": "failed",
+            "details": error_msg,
+        })
 
     # ─────────────────────────────────────────
     # DATA LAB COMMANDS

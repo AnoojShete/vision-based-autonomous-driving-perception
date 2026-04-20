@@ -84,3 +84,19 @@ def detect_pedestrians_frame(frame, draw=True):
         return annotated, status
     except Exception as exc:
         return frame, f"Error: {exc}"
+    
+def detect_pedestrians_data(frame):
+    if model is None:
+        return []
+
+    results = model.predict(source=frame, classes=0, conf=0.3, verbose=False)
+    boxes = results[0].boxes
+
+    output = []
+    for box in boxes:
+        x1, y1, x2, y2 = map(int, box.xyxy[0])
+        conf = float(box.conf[0])
+
+        output.append((x1, y1, x2, y2, conf))
+
+    return output
