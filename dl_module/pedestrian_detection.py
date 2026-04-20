@@ -46,3 +46,41 @@ def detect_pedestrians(image_path):
     status = f"Found {count} Pedestrian(s)" if count > 0 else "No pedestrians found."
     
     return annotated_img, status
+
+
+def detect_pedestrians_frame(frame, draw=True):
+    """
+    Frame-based pedestrian detection for video/image pipelines.
+    Returns (annotated_frame, status_text).
+    """
+    if model is None:
+        return frame, "Error: Model not loaded."
+    if frame is None:
+        return frame, "Error: Empty frame."
+
+    try:
+        results = model.predict(source=frame, classes=0, conf=0.4, verbose=False)
+        result = results[0]
+        boxes = result.boxes
+        annotated = frame.copy()
+
+        if draw:
+            for box in boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                label = f"Pedestrian: {float(box.conf[0]):.2f}"
+                cv2.putText(
+                    annotated,
+                    label,
+                    (x1, max(14, y1 - 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 0, 255),
+                    2,
+                )
+
+        count = len(boxes)
+        status = f"Found {count} Pedestrian(s)" if count > 0 else "No pedestrians found."
+        return annotated, status
+    except Exception as exc:
+        return frame, f"Error: {exc}"

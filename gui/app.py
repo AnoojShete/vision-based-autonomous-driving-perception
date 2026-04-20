@@ -56,7 +56,7 @@ except ImportError:
 try:
     from dl_module.traffic_sign.predict import predict_traffic_sign
     from dl_module.lane_detection import detect_lanes_image as run_basic_lane
-    from dl_module.pipeline import run_advanced_pipeline
+    from dl_module.pipeline import run_advanced_pipeline, process_image, process_video, set_video_progress_callback
     from dl_module.pedestrian_detection import detect_pedestrians
     from ml_module.train_traffic_sign import start_training as train_cnn_demo
     DL_OK = True
@@ -65,6 +65,10 @@ except ImportError:
     def predict_traffic_sign(path): raise NotImplementedError("dl_module not available")
     def run_basic_lane(path): raise NotImplementedError("dl_module not available")
     def run_advanced_pipeline(path): raise NotImplementedError("dl_module not available")
+    def process_image(path): raise NotImplementedError("dl_module not available")
+    def process_video(input_path, output_path): raise NotImplementedError("dl_module not available")
+    def set_video_progress_callback(callback):
+        return None
     def detect_pedestrians(path): raise NotImplementedError("dl_module not available")
     def train_cnn_demo(data_path, limit, epochs, log_func): raise NotImplementedError("ml_module not available")
 
@@ -120,7 +124,7 @@ class AutoDriveApp(tb.Window):
         self._pipeline_running = False
         self._pipeline_started_at = None
         self._pipeline_history_path = os.path.join("Public", "vision_history.json")
-        self._drop_hint_var = tk.StringVar(value="Drag and drop is optional. Use Browse for JPG, PNG, or ZIP inputs.")
+        self._drop_hint_var = tk.StringVar(value="Supports JPG, PNG, MP4, AVI, MOV or ZIP.")
         self._drag_drop_ready = False
         self._system_health = {}
         self._tkdnd_backend_ready = False
@@ -813,7 +817,7 @@ class AutoDriveApp(tb.Window):
         self._drop_area = tk.Frame(workspace_card, bg=CARD_BG_ALT, highlightthickness=1, highlightbackground=BORDER)
         self._drop_area.pack(fill="both", expand=True, padx=18, pady=(18, 10))
 
-        tk.Label(self._drop_area, text="Drop Image Here", font=("Segoe UI Semibold", 15),
+        tk.Label(self._drop_area, text="Drop Image or Video Here", font=("Segoe UI Semibold", 15),
                  fg=TEXT_PRIMARY, bg=CARD_BG_ALT).pack(pady=(28, 6))
         tk.Label(self._drop_area,
                  textvariable=self._drop_hint_var,
@@ -821,7 +825,7 @@ class AutoDriveApp(tb.Window):
 
         upload_row = tk.Frame(self._drop_area, bg=CARD_BG_ALT)
         upload_row.pack(pady=12)
-        tb.Button(upload_row, text="Browse Image", bootstyle="info-outline", command=self._cmd_upload_vision_image).pack(side="left", padx=5)
+        tb.Button(upload_row, text="Browse Media", bootstyle="info-outline", command=self._cmd_upload_vision_image).pack(side="left", padx=5)
         tb.Button(upload_row, text="Use Sample", bootstyle="secondary-outline", command=self._cmd_load_sample_image).pack(side="left", padx=5)
 
         self._img_label = tk.Label(self._drop_area,
@@ -984,9 +988,22 @@ class AutoDriveApp(tb.Window):
 
         for item in candidates:
             path = item.strip().strip("{}")
-            if os.path.isfile(path) and path.lower().endswith((".jpg", ".jpeg", ".png", ".zip")):
+            if os.path.isfile(path) and path.lower().endswith((".jpg", ".jpeg", ".png", ".zip", ".mp4", ".avi", ".mov")):
                 return path
         return ""
+
+    def _is_video_file(self, path):
+        return str(path).lower().endswith((".mp4", ".avi", ".mov"))
+
+    def _build_video_output_path(self, input_path):
+        base = os.path.splitext(os.path.basename(input_path))[0]
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        ext = os.path.splitext(input_path)[1].lower()
+        if ext not in (".mp4", ".avi", ".mov"):
+            ext = ".mp4"
+        if not os.path.exists("Public"):
+            os.makedirs("Public")
+        return os.path.join("Public", f"{base}_processed_{stamp}{ext}")
 
     def _load_vision_input(self, file_path, source="browse"):
         resolved = self._resolve_vision_input(file_path)
@@ -999,8 +1016,8 @@ class AutoDriveApp(tb.Window):
 
     def _cmd_upload_vision_image(self):
         file = filedialog.askopenfilename(
-            title="Select Drive Image",
-            filetypes=[("Images and ZIP", "*.jpg *.jpeg *.png *.zip")],
+            title="Select Drive Media",
+            filetypes=[("Images, Videos and ZIP", "*.jpg *.jpeg *.png *.mp4 *.avi *.mov *.zip")],
         )
         if not file:
             return
@@ -1012,10 +1029,10 @@ class AutoDriveApp(tb.Window):
             if not os.path.exists(root):
                 continue
             for name in os.listdir(root):
-                if name.lower().endswith((".jpg", ".jpeg", ".png", ".zip")):
+                if name.lower().endswith((".jpg", ".jpeg", ".png", ".zip", ".mp4", ".avi", ".mov")):
                     candidates.append(os.path.join(root, name))
         if not candidates:
-            messagebox.showinfo("Sample Image", "No sample image found in Public or project root.")
+            messagebox.showinfo("Sample Media", "No sample media found in Public or project root.")
             return
         self._load_vision_input(candidates[0], source="sample")
 
@@ -1321,6 +1338,13 @@ class AutoDriveApp(tb.Window):
         refresh_list()
 
     def _update_upload_preview(self, file_path):
+        if self._is_video_file(file_path):
+            self._vision_input_photo = None
+            self._img_label.config(
+                image="",
+                text=f"Video loaded:\n{os.path.basename(file_path)}\n\nPreview is skipped for video inputs.",
+            )
+            return
         if not PIL_OK:
             self._img_label.config(text=f"Loaded: {os.path.basename(file_path)}")
             return
@@ -1375,11 +1399,73 @@ class AutoDriveApp(tb.Window):
         if running:
             self._pipeline_started_at = time.perf_counter()
             self._run_btn.config(text="Processing...", state="disabled", bg="#79e8ff")
+            self._pipeline_progress.configure(mode="indeterminate", maximum=100, value=0)
             self._pipeline_progress.start(12)
             self._pipeline_status_var.set("Status: Running pipeline")
         else:
             self._run_btn.config(text="🚀 Run Full Pipeline", state="normal", bg=ACCENT)
             self._pipeline_progress.stop()
+            self._pipeline_progress.configure(mode="indeterminate", maximum=100, value=0)
+
+    def _prepare_video_progress_ui(self):
+        self._pipeline_progress.stop()
+        self._pipeline_progress.configure(mode="determinate", maximum=100, value=0)
+        self._pipeline_status_var.set("Status: Processing video (0%)")
+
+    def _update_video_progress(self, done, total):
+        if total and total > 0:
+            self._pipeline_progress.configure(mode="determinate", maximum=total)
+            self._pipeline_progress["value"] = min(done, total)
+            pct = (done * 100.0) / total
+            self._pipeline_status_var.set(f"Status: Processing video ({pct:.1f}%)")
+        else:
+            self._pipeline_status_var.set(f"Status: Processing video (frames: {done})")
+
+    def _pipeline_video_done(self, status, output_path, selected, source_file):
+        self._set_pipeline_running(False)
+        elapsed = 0.0
+        if self._pipeline_started_at is not None:
+            elapsed = max(0.0001, time.perf_counter() - self._pipeline_started_at)
+
+        self._metric_fps.set("FPS: video")
+        self._metric_acc.set("Accuracy: n/a")
+        self._metric_status.set("Detections: video processed")
+        self._output_img_label.config(
+            image="",
+            text=f"Video processed successfully.\nSaved to:\n{output_path}",
+        )
+
+        self._result_text.config(state="normal")
+        self._result_text.delete("1.0", "end")
+        self._result_text.insert(
+            "end",
+            (
+                "Pipeline Summary\n"
+                f"Modules: {', '.join(selected)}\n"
+                f"Source: {os.path.basename(source_file)}\n"
+                f"Output: {output_path}\n"
+                f"Status: {status}\n"
+                f"Runtime: {elapsed:.2f}s"
+            ),
+        )
+        self._result_text.config(state="disabled")
+        self._pipeline_status_var.set("Status: Completed")
+        self.log(f"[OK]   Video pipeline complete: {output_path}")
+        self._append_pipeline_history(
+            {
+                "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+                "source_file": source_file,
+                "output_file": output_path,
+                "modules": selected,
+                "status": "success",
+                "details": status,
+                "runtime_s": round(elapsed, 3),
+                "fps": None,
+                "confidence": None,
+                "confidence_label": "Accuracy: n/a",
+            }
+        )
+        messagebox.showinfo("Video Complete", f"Output saved to:\n{output_path}")
 
     def _cmd_traffic_sign(self):
         file = self._vision_input_path
@@ -1573,9 +1659,31 @@ class AutoDriveApp(tb.Window):
         self.log(f"[INFO] Running pipeline on: {file}")
         self.log(f"[INFO] Modules: {', '.join(selected)}")
         self._set_pipeline_running(True)
+        is_video = self._is_video_file(file)
 
         def run():
             try:
+                if is_video:
+                    output_path = self._build_video_output_path(file)
+                    self.after(0, self._prepare_video_progress_ui)
+
+                    def _progress(done, total):
+                        self.after(0, lambda d=done, t=total: self._update_video_progress(d, t))
+
+                    set_video_progress_callback(_progress)
+                    status = process_video(file, output_path)
+                    set_video_progress_callback(None)
+
+                    if not str(status).startswith("OK:"):
+                        raise RuntimeError(status)
+
+                    self.after(
+                        0,
+                        lambda s=status, out=output_path, mods=list(selected), src=file:
+                        self._pipeline_video_done(s, out, mods, src),
+                    )
+                    return
+
                 confidence = None
                 if len(selected) == 1 and selected[0] == "lane":
                     result = run_basic_lane(file)
@@ -1590,11 +1698,13 @@ class AutoDriveApp(tb.Window):
                     result_img = None
                     status = f"Traffic sign detected: {label}"
                 else:
-                    result_img, status = run_advanced_pipeline(file)
+                    result_img, status = process_image(file)
                     confidence = self._extract_confidence(status)
-                self.after(0, lambda: self._pipeline_done(result_img, status, selected, confidence, file))
+                self.after(0, lambda img=result_img, st=status, mods=list(selected), conf=confidence, src=file: self._pipeline_done(img, st, mods, conf, src))
             except Exception as e:
-                self.after(0, lambda: self._pipeline_error(str(e), selected, file))
+                set_video_progress_callback(None)
+                err_msg = str(e)
+                self.after(0, lambda msg=err_msg, mods=list(selected), src=file: self._pipeline_error(msg, mods, src))
         threading.Thread(target=run, daemon=True).start()
 
     def _pipeline_done(self, result_img, status, selected, confidence, source_file):
@@ -1924,7 +2034,8 @@ class AutoDriveApp(tb.Window):
                 text = f"Task={task}, Samples={summary['samples']}, Features={summary['features']}"
                 self.after(0, lambda: self._preprocess_done(text))
             except Exception as e:
-                self.after(0, lambda: self._preprocess_fail(str(e)))
+                err_msg = str(e)
+                self.after(0, lambda msg=err_msg: self._preprocess_fail(msg))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -1953,7 +2064,8 @@ class AutoDriveApp(tb.Window):
                 result = train_driving_model(task=task, algorithm=algo, data_dir="data", test_size=0.2, max_samples=5000)
                 self.after(0, lambda: self._train_done(result))
             except Exception as e:
-                self.after(0, lambda: self._train_error(str(e)))
+                err_msg = str(e)
+                self.after(0, lambda msg=err_msg: self._train_error(msg))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -2077,7 +2189,8 @@ class AutoDriveApp(tb.Window):
                 )
                 self.log(f"[OK]   Dataset preprocess complete (nulls fixed: {nulls_before})")
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Error", str(e)))
+                err_msg = str(e)
+                self.after(0, lambda msg=err_msg: messagebox.showerror("Error", msg))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -2100,7 +2213,8 @@ class AutoDriveApp(tb.Window):
                 self.after(0, lambda: self._adv_status_var.set(f"Model trained. Accuracy: {acc:.1%}"))
                 self.log(f"[OK]   Dataset {algo} Accuracy: {acc:.4f}")
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Error", str(e)))
+                err_msg = str(e)
+                self.after(0, lambda msg=err_msg: messagebox.showerror("Error", msg))
 
         threading.Thread(target=run, daemon=True).start()
 

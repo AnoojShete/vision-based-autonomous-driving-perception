@@ -60,3 +60,27 @@ def predict_traffic_sign(image_path):
     
     result_text = CLASSES.get(class_index, "Unknown")
     return f"{result_text} ({confidence*100:.1f}%)"
+
+
+def predict_traffic_sign_frame(frame):
+    """
+    Frame-based traffic-sign prediction.
+    Returns (label, confidence, class_index).
+    """
+    if not load_traffic_model():
+        return None, None, None
+    if frame is None:
+        return None, None, None
+
+    try:
+        img = cv2.resize(frame, (30, 30))
+        img = img / 255.0
+        img = np.expand_dims(img, axis=0)
+
+        predictions = model.predict(img, verbose=0)
+        class_index = int(np.argmax(predictions))
+        confidence = float(np.max(predictions))
+        label = CLASSES.get(class_index, "Unknown")
+        return label, confidence, class_index
+    except Exception:
+        return None, None, None
