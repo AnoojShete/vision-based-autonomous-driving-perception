@@ -27,7 +27,8 @@ def load_traffic_model():
     global model
     if model is None:
         try:
-            model = tf.keras.models.load_model(MODEL_PATH)
+            # compile=False avoids loading training state and is faster for inference-only use.
+            model = tf.keras.models.load_model(MODEL_PATH, compile=False)
             print("✅ Traffic Sign Model Loaded!")
         except Exception as e:
             print(f"❌ Error loading model: {e}")
@@ -40,6 +41,8 @@ def predict_traffic_sign(image_path):
 
     # 1. Read Image
     img = cv2.imread(image_path)
+    if img is None:
+        return "Could not read image"
     
     img = cv2.resize(img, (30, 30))
     
@@ -51,7 +54,7 @@ def predict_traffic_sign(image_path):
     img = np.expand_dims(img, axis=0)
     
     # 4. Predict
-    predictions = model.predict(img)
+    predictions = model.predict(img, verbose=0)
     class_index = np.argmax(predictions)
     confidence = np.max(predictions)
     

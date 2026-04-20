@@ -5,6 +5,12 @@ from ttkbootstrap.constants import *
 import threading
 import datetime
 import os
+import time
+import json
+import re
+import importlib
+import zipfile
+import shutil
 
 # ─────────────────────────────────────────
 # BACKEND IMPORTS
@@ -26,6 +32,14 @@ try:
     PIL_OK = True
 except ImportError:
     PIL_OK = False
+
+try:
+    _dnd_module = importlib.import_module("tkinterdnd2")
+    DND_FILES = getattr(_dnd_module, "DND_FILES", None)
+    DND_OK = DND_FILES is not None
+except Exception:
+    DND_FILES = None
+    DND_OK = False
 
 try:
     from ml_module.train import get_driving_dataset_summary, train_driving_model, train_model
@@ -58,24 +72,28 @@ except ImportError:
 # ─────────────────────────────────────────
 # COLOUR & STYLE CONSTANTS
 # ─────────────────────────────────────────
-SIDEBAR_BG   = "#0d0f14"
+SIDEBAR_BG   = "#0b1120"
 SIDEBAR_W    = 300
-ACCENT       = "#00d4ff" 
-ACCENT2      = "#ff4f5e"
-ACCENT3      = "#f5c518" 
-CONTENT_BG   = "#12151c"
-CARD_BG      = "#1a1e2a"
-LOG_BG       = "#0a0c10"
-TEXT_PRIMARY = "#e8eaf0"
-TEXT_MUTED   = "#5c6370"
-NAV_ACTIVE   = "#1e2230"
-NAV_HOVER    = "#161924"
-FONT_TITLE   = ("Courier New", 13, "bold")
-FONT_NAV     = ("Courier New", 11)
-FONT_LABEL   = ("Courier New", 10)
-FONT_LOG     = ("Courier New", 9)
-FONT_HEADING = ("Courier New", 18, "bold")
-FONT_SUB     = ("Courier New", 11)
+ACCENT       = "#22d3ee"
+ACCENT2      = "#ff5f7a"
+ACCENT3      = "#f59e0b"
+ACCENT4      = "#8b5cf6"
+CONTENT_BG   = "#060a12"
+CARD_BG      = "#111827"
+CARD_BG_ALT  = "#0f172a"
+LOG_BG       = "#0a1220"
+BORDER       = "#1e2d42"
+TEXT_PRIMARY = "#e4ecf7"
+TEXT_MUTED   = "#8a9bc0"
+TEXT_FAINT   = "#5f7196"
+NAV_ACTIVE   = "#1a2234"
+NAV_HOVER    = "#151d2d"
+FONT_TITLE   = ("Segoe UI Semibold", 13)
+FONT_NAV     = ("Segoe UI", 11)
+FONT_LABEL   = ("Segoe UI", 10)
+FONT_LOG     = ("Consolas", 9)
+FONT_HEADING = ("Segoe UI Semibold", 22)
+FONT_SUB     = ("Segoe UI", 11)
 
 
 class AutoDriveApp(tb.Window):
@@ -94,12 +112,27 @@ class AutoDriveApp(tb.Window):
         self._last_driving_result = None
         self._last_adv_result = None
         self._active_nav   = tk.StringVar(value="dashboard")
+        self._vision_input_path = ""
+        self._vision_input_image = None
+        self._vision_output_image = None
+        self._vision_input_photo = None
+        self._vision_output_photo = None
+        self._pipeline_running = False
+        self._pipeline_started_at = None
+        self._pipeline_history_path = os.path.join("Public", "vision_history.json")
+        self._drop_hint_var = tk.StringVar(value="Drag and drop is optional. Use Browse for JPG, PNG, or ZIP inputs.")
+        self._drag_drop_ready = False
+        self._system_health = {}
+        self._tkdnd_backend_ready = False
 
         if not os.path.exists("Public"):
             os.makedirs("Public")
 
+        self._initialize_tkdnd_backend()
+
         self._build_sidebar()
         self._build_main_area()
+        self._refresh_system_status(force_log=False)
 
         self.show_view("dashboard")
         self.log("[INFO] AutoDrive AI started.")
@@ -203,24 +236,45 @@ class AutoDriveApp(tb.Window):
         right = tk.Frame(self, bg=CONTENT_BG)
         right.pack(side="left", fill="both", expand=True)
 
-        self._content_host = tk.Frame(right, bg=CONTENT_BG)
-        self._content_host.pack(fill="both", expand=True, padx=0, pady=0)
+        # Vertical split lets users resize content area vs. log area by dragging the sash.
+        splitter = tk.PanedWindow(
+            right,
+            orient="vertical",
+            sashwidth=8,
+            sashrelief="flat",
+            opaqueresize=False,
+            sashcursor="sb_v_double_arrow",
+            bg=BORDER,
+            bd=0,
+            relief="flat",
+        )
+        splitter.pack(fill="both", expand=True)
 
-        tk.Frame(right, bg="#1e2230", height=1).pack(fill="x")
-
-        console_frame = tk.Frame(right, bg=LOG_BG, height=160)
-        console_frame.pack(fill="x", side="bottom")
+        self._content_host = tk.Frame(splitter, bg=CONTENT_BG)
+        console_frame = tk.Frame(splitter, bg=LOG_BG, height=180)
         console_frame.pack_propagate(False)
+
+        splitter.add(self._content_host, minsize=340, stretch="always")
+        splitter.add(console_frame, minsize=110)
+
+        self._main_splitter = splitter
+        self._main_right = right
+        self._splitter_after_id = None
+
+        # Set an initial split that keeps the log visible without dominating the workspace.
+        self.after(0, self._clamp_splitter_sash)
+        splitter.bind("<ButtonRelease-1>", lambda _e: self._clamp_splitter_sash())
+        right.bind("<Configure>", lambda _e: self._schedule_splitter_clamp())
 
         hdr = tk.Frame(console_frame, bg=LOG_BG)
         hdr.pack(fill="x", padx=12, pady=(6, 0))
-        tk.Label(hdr, text="▸ CONSOLE", font=("Courier New", 8, "bold"),
+        tk.Label(hdr, text="▸ SYSTEM LOG", font=("Consolas", 8, "bold"),
                  fg=ACCENT, bg=LOG_BG).pack(side="left")
-        tk.Button(hdr, text="CLEAR", font=("Courier New", 7),
+        tk.Button(hdr, text="CLEAR", font=("Consolas", 7),
                   fg=TEXT_MUTED, bg=LOG_BG, bd=0, activebackground=LOG_BG,
                   cursor="hand2", command=self._clear_log).pack(side="right")
 
-        self._log_text = tk.Text(console_frame, bg=LOG_BG, fg="#7ec8a0",
+        self._log_text = tk.Text(console_frame, bg=LOG_BG, fg=TEXT_PRIMARY,
                                   font=FONT_LOG, bd=0, wrap="word",
                                   state="disabled", cursor="arrow",
                                   insertbackground=LOG_BG)
@@ -229,23 +283,281 @@ class AutoDriveApp(tb.Window):
         self._log_text.config(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
         self._log_text.pack(fill="both", expand=True, padx=12, pady=6)
+        self._log_text.tag_config("ts", foreground=TEXT_FAINT)
+        self._log_text.tag_config("INFO", foreground=ACCENT)
+        self._log_text.tag_config("SUCCESS", foreground="#00e5a0")
+        self._log_text.tag_config("WARN", foreground=ACCENT3)
+        self._log_text.tag_config("ERROR", foreground=ACCENT2)
+        self._log_text.tag_config("body", foreground=TEXT_PRIMARY)
 
         self._views = {}
         self._views["dashboard"] = self._build_dashboard_view(self._content_host)
         self._views["vision"]    = self._build_vision_view(self._content_host)
         self._views["datalab"]   = self._build_datalab_view(self._content_host)
 
+    def _schedule_splitter_clamp(self):
+        if not hasattr(self, "_main_splitter"):
+            return
+        if self._splitter_after_id is not None:
+            try:
+                self.after_cancel(self._splitter_after_id)
+            except Exception:
+                pass
+        self._splitter_after_id = self.after(70, self._clamp_splitter_sash)
+
+    def _clamp_splitter_sash(self):
+        self._splitter_after_id = None
+        if not hasattr(self, "_main_splitter") or not hasattr(self, "_main_right"):
+            return
+
+        splitter = self._main_splitter
+        right = self._main_right
+
+        try:
+            total_h = max(1, int(right.winfo_height()))
+            min_content_h = 340
+            min_log_h = 110
+            max_log_h = min(280, int(total_h * 0.38))
+
+            # For compact windows, keep a sane content area while preserving log access.
+            if total_h - min_content_h < min_log_h:
+                min_content_h = max(260, total_h - min_log_h)
+
+            try:
+                current_y = int(splitter.sash_coord(0)[1])
+            except Exception:
+                current_y = max(min_content_h, total_h - 200)
+
+            lower = min_content_h
+            upper = max(lower, total_h - min_log_h)
+            target_y = max(lower, min(current_y, upper))
+
+            log_h = total_h - target_y
+            if log_h > max_log_h:
+                target_y = total_h - max_log_h
+
+            splitter.sash_place(0, 0, int(target_y))
+        except Exception:
+            return
+
     def show_view(self, key):
         for k, frame in self._views.items():
             frame.pack_forget()
         self._views[key].pack(fill="both", expand=True)
         self._set_active_nav(key)
+        if key == "dashboard":
+            self._refresh_dashboard_state()
+
+    def _is_public_writable(self):
+        try:
+            if not os.path.exists("Public"):
+                os.makedirs("Public")
+            probe = os.path.join("Public", ".write_probe.tmp")
+            with open(probe, "w", encoding="utf-8") as handle:
+                handle.write("ok")
+            os.remove(probe)
+            return True
+        except Exception:
+            return False
+
+    def _is_tkdnd_backend_available(self):
+        if self._tkdnd_backend_ready:
+            return True
+        if not DND_OK:
+            return False
+        try:
+            tkdnd_cmd = str(self.tk.call("info", "commands", "tkdnd::drop_target")).strip()
+            return bool(tkdnd_cmd)
+        except Exception:
+            return False
+
+    def _initialize_tkdnd_backend(self):
+        if not DND_OK:
+            self._tkdnd_backend_ready = False
+            return
+        try:
+            tkdnd_ns = getattr(_dnd_module, "TkinterDnD", None)
+            if tkdnd_ns and hasattr(tkdnd_ns, "_require"):
+                tkdnd_ns._require(self)
+            tkdnd_cmd = str(self.tk.call("info", "commands", "tkdnd::drop_target")).strip()
+            self._tkdnd_backend_ready = bool(tkdnd_cmd)
+            if not self._tkdnd_backend_ready:
+                self.log("[WARN] TkDND package detected but backend command is unavailable.")
+        except Exception as e:
+            self._tkdnd_backend_ready = False
+            self.log(f"[WARN] TkDND bootstrap failed: {e}")
+
+    def _choose_zip_image_member(self, zip_path, members):
+        chooser = tk.Toplevel(self)
+        chooser.title("Select Image From ZIP")
+        chooser.geometry("720x420")
+        chooser.configure(bg=CARD_BG)
+        chooser.transient(self)
+        chooser.grab_set()
+
+        tk.Label(
+            chooser,
+            text="Choose an image to run",
+            font=("Segoe UI Semibold", 12),
+            fg=TEXT_PRIMARY,
+            bg=CARD_BG,
+        ).pack(anchor="w", padx=14, pady=(12, 2))
+        tk.Label(
+            chooser,
+            text=os.path.basename(zip_path),
+            font=FONT_LABEL,
+            fg=TEXT_MUTED,
+            bg=CARD_BG,
+        ).pack(anchor="w", padx=14, pady=(0, 8))
+
+        list_wrap = tk.Frame(chooser, bg=CARD_BG)
+        list_wrap.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+        listbox = tk.Listbox(
+            list_wrap,
+            bg=CARD_BG_ALT,
+            fg=TEXT_PRIMARY,
+            selectbackground=NAV_ACTIVE,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            bd=0,
+            font=FONT_LOG,
+        )
+        scroll = tk.Scrollbar(list_wrap, command=listbox.yview, bg=CARD_BG)
+        listbox.config(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        listbox.pack(side="left", fill="both", expand=True)
+
+        for name in members:
+            listbox.insert("end", name)
+        if members:
+            listbox.selection_set(0)
+
+        choice = {"value": None}
+
+        def on_select(_event=None):
+            picked = listbox.curselection()
+            if not picked:
+                return
+            choice["value"] = members[picked[0]]
+            chooser.destroy()
+
+        def on_cancel():
+            choice["value"] = None
+            chooser.destroy()
+
+        controls = tk.Frame(chooser, bg=CARD_BG)
+        controls.pack(fill="x", padx=14, pady=(0, 12))
+        tb.Button(controls, text="Use Selected", bootstyle="info", command=on_select).pack(side="left")
+        tb.Button(controls, text="Cancel", bootstyle="secondary-outline", command=on_cancel).pack(side="left", padx=(8, 0))
+
+        listbox.bind("<Double-Button-1>", on_select)
+        chooser.protocol("WM_DELETE_WINDOW", on_cancel)
+        chooser.wait_window()
+        return choice["value"]
+
+    def _extract_image_from_zip(self, zip_path):
+        if not os.path.exists(zip_path):
+            return None
+
+        extract_root = os.path.join("Public", "zip_extract")
+        if not os.path.exists(extract_root):
+            os.makedirs(extract_root)
+
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        target_dir = os.path.join(extract_root, stamp)
+        os.makedirs(target_dir, exist_ok=True)
+
+        image_candidates = []
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            for name in zf.namelist():
+                lowered = name.lower()
+                if lowered.endswith((".jpg", ".jpeg", ".png")) and not lowered.endswith("/"):
+                    image_candidates.append(name)
+
+            if not image_candidates:
+                return ""
+
+            image_candidates = sorted(image_candidates)
+            if len(image_candidates) == 1:
+                chosen = image_candidates[0]
+            else:
+                chosen = self._choose_zip_image_member(zip_path, image_candidates)
+                if not chosen:
+                    return None
+
+            safe_name = os.path.basename(chosen) or "image_from_zip.png"
+            out_path = os.path.join(target_dir, safe_name)
+            with zf.open(chosen, "r") as src, open(out_path, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            return out_path
+
+    def _resolve_vision_input(self, file_path):
+        if file_path.lower().endswith(".zip"):
+            try:
+                extracted = self._extract_image_from_zip(file_path)
+            except Exception as e:
+                self.log(f"[ERR] Failed to read zip: {e}")
+                return None
+            if extracted == "":
+                messagebox.showerror("ZIP Error", "No JPG/PNG image found inside the ZIP file.")
+                return None
+            if extracted is None:
+                self.log("[INFO] ZIP selection canceled by user.")
+                return None
+            self.log(f"[INFO] ZIP input extracted: {os.path.basename(extracted)}")
+            return extracted
+        return file_path
+
+    def _compute_system_health(self):
+        health = {
+            "dl_module": DL_OK,
+            "ml_module": ML_OK,
+            "opencv": CV2_OK,
+            "pillow": PIL_OK,
+            "pandas": PANDAS_OK,
+            "yolo_weights": os.path.exists("yolov8n.pt"),
+            "public_writable": self._is_public_writable(),
+            "tkdnd_backend": self._is_tkdnd_backend_available(),
+            "drag_drop": self._drag_drop_ready,
+        }
+        critical_keys = ["dl_module", "opencv", "yolo_weights", "public_writable"]
+        critical_missing = [k for k in critical_keys if not health.get(k)]
+        health["critical_missing"] = critical_missing
+        health["ready"] = len(critical_missing) == 0
+        return health
+
+    def _refresh_system_status(self, force_log=False):
+        self._system_health = self._compute_system_health()
+        missing = self._system_health.get("critical_missing", [])
+        if not missing:
+            text = "● System Ready"
+            color = "#00e5a0"
+        else:
+            text = f"● System Check ({len(missing)} issue{'s' if len(missing) != 1 else ''})"
+            color = ACCENT3 if len(missing) <= 2 else ACCENT2
+            if force_log:
+                self.log(f"[WARN] Critical checks failing: {', '.join(missing)}")
+
+        self._status_dot.config(text=text, fg=color)
+        self._refresh_dashboard_state()
 
     def log(self, msg):
-        ts  = datetime.datetime.now().strftime("%H:%M:%S")
-        line = f"[{ts}] {msg}\n"
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        level = "INFO"
+        clean = msg
+        if msg.startswith("[OK]"):
+            level, clean = "SUCCESS", msg[4:].strip()
+        elif msg.startswith("[ERR]"):
+            level, clean = "ERROR", msg[5:].strip()
+        elif msg.startswith("[WARN]"):
+            level, clean = "WARN", msg[6:].strip()
+        elif msg.startswith("[INFO]"):
+            level, clean = "INFO", msg[6:].strip()
+
         self._log_text.config(state="normal")
-        self._log_text.insert("end", line)
+        self._log_text.insert("end", f"[{ts}] ", "ts")
+        self._log_text.insert("end", f"{level:<7}", level)
+        self._log_text.insert("end", f" {clean}\n", "body")
         self._log_text.see("end")
         self._log_text.config(state="disabled")
 
@@ -260,34 +572,184 @@ class AutoDriveApp(tb.Window):
     def _build_dashboard_view(self, parent):
         view = tk.Frame(parent, bg=CONTENT_BG)
 
-        tk.Label(view, text="🚗  Autonomous Driving\nPerception System",
-                 font=("Courier New", 22, "bold"), fg=TEXT_PRIMARY,
-                 bg=CONTENT_BG, justify="left").pack(anchor="w", padx=40, pady=(40, 4))
-        tk.Label(view, text="Real-time vision, detection & classification — all in one toolkit.",
-                 font=FONT_SUB, fg=TEXT_MUTED, bg=CONTENT_BG).pack(anchor="w", padx=42, pady=(0, 30))
+        self._db_total_runs_var = tk.StringVar(value="0")
+        self._db_success_runs_var = tk.StringVar(value="0")
+        self._db_fail_runs_var = tk.StringVar(value="0")
+        self._db_dl_var = tk.StringVar(value="Checking...")
+        self._db_ml_var = tk.StringVar(value="Checking...")
+        self._latest_run_when_var = tk.StringVar(value="--")
+        self._latest_run_modules_var = tk.StringVar(value="--")
+        self._latest_run_file_var = tk.StringVar(value="--")
+        self._latest_run_runtime_var = tk.StringVar(value="--")
+        self._latest_run_fps_var = tk.StringVar(value="--")
+        self._latest_run_conf_var = tk.StringVar(value="--")
 
-        cards_row = tk.Frame(view, bg=CONTENT_BG)
-        cards_row.pack(anchor="w", padx=40, pady=4)
+        top = tk.Frame(view, bg=CONTENT_BG)
+        top.pack(fill="x", padx=32, pady=(24, 0))
+        tk.Label(top, text="Command Center", font=FONT_HEADING,
+                 fg=TEXT_PRIMARY, bg=CONTENT_BG).pack(anchor="w")
+        tk.Label(
+            top,
+            text="Operational overview with direct actions for Vision runs, training, and run diagnostics.",
+            font=FONT_SUB,
+            fg=TEXT_MUTED,
+            bg=CONTENT_BG,
+        ).pack(anchor="w", pady=(4, 10))
 
-        modules = [
-            ("👁️  Vision Studio",    "DL / CV Pipeline",    ACCENT,  DL_OK),
-            ("📊  Data Lab",          "Classical ML",         ACCENT3, ML_OK),
-            ("🎯  YOLOv8",            "Object Detection",     ACCENT2, DL_OK),
-            ("🛣️  Lane Detection",    "Geometric CV",         "#a78bfa", DL_OK),
-        ]
-        for title, sub, color, ok in modules:
-            self._status_card(cards_row, title, sub, color, ok)
+        actions = tk.Frame(top, bg=CONTENT_BG)
+        actions.pack(anchor="w", pady=(0, 6))
+        tb.Button(actions, text="Open Vision Studio", bootstyle="info", command=lambda: self.show_view("vision")).pack(side="left", padx=(0, 8))
+        tb.Button(actions, text="Open Data Lab", bootstyle="warning-outline", command=lambda: self.show_view("datalab")).pack(side="left", padx=(0, 8))
+        tb.Button(actions, text="View Run History", bootstyle="secondary-outline", command=self._cmd_view_pipeline_history).pack(side="left")
+        tb.Button(actions, text="Run System Check", bootstyle="success-outline", command=lambda: self._refresh_system_status(force_log=True)).pack(side="left", padx=(8, 0))
 
-        tip = tk.Frame(view, bg=CARD_BG, pady=16)
-        tip.pack(fill="x", padx=40, pady=30)
-        tk.Label(tip, text="  ⚡  QUICK START",
-                 font=("Courier New", 9, "bold"), fg=ACCENT, bg=CARD_BG).pack(anchor="w", padx=20)
-        tk.Label(tip,
-                 text=("  1. Navigate to 👁️ Vision Studio and load an image.\n"
-                       "  2. Run the 🚀 Full Autonomous Pipeline for a complete perception pass.\n"
-                       "  3. Or head to 📊 Data Lab to train a classical ML model on a CSV dataset."),
-                 font=FONT_LOG, fg=TEXT_PRIMARY, bg=CARD_BG, justify="left").pack(anchor="w", padx=20, pady=6)
+        snapshot = tk.Frame(view, bg=CONTENT_BG)
+        snapshot.pack(fill="x", padx=32, pady=(10, 6))
+        for title, value_var, color in [
+            ("Total Runs", self._db_total_runs_var, ACCENT),
+            ("Successful", self._db_success_runs_var, "#00e5a0"),
+            ("Failed", self._db_fail_runs_var, ACCENT2),
+            ("DL Modules", self._db_dl_var, ACCENT4),
+            ("ML Modules", self._db_ml_var, ACCENT3),
+        ]:
+            card = tk.Frame(snapshot, bg=CARD_BG, highlightthickness=1, highlightbackground=BORDER, width=180, height=88)
+            card.pack(side="left", padx=(0, 8), fill="y")
+            card.pack_propagate(False)
+            tk.Label(card, text=title, font=("Segoe UI", 9), fg=TEXT_MUTED, bg=CARD_BG).pack(anchor="w", padx=12, pady=(10, 2))
+            tk.Label(card, textvariable=value_var, font=("Segoe UI Semibold", 16), fg=color, bg=CARD_BG).pack(anchor="w", padx=12)
+
+        lower = tk.Frame(view, bg=CONTENT_BG)
+        lower.pack(fill="both", expand=True, padx=32, pady=(8, 18))
+        left = tk.Frame(lower, bg=CARD_BG, highlightthickness=1, highlightbackground=BORDER)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 8))
+        right = tk.Frame(lower, bg=CARD_BG, highlightthickness=1, highlightbackground=BORDER)
+        right.pack(side="left", fill="both", expand=True, padx=(8, 0))
+
+        tk.Label(left, text="Startup Checklist", font=("Segoe UI Semibold", 12), fg=TEXT_PRIMARY, bg=CARD_BG).pack(anchor="w", padx=14, pady=(12, 8))
+        self._dashboard_check_rows = {}
+        for key, title in [
+            ("vision_pipeline", "Vision pipeline backend"),
+            ("data_lab", "Data Lab backend"),
+            ("drag_drop", "Drag-and-drop"),
+            ("history_store", "History persistence"),
+        ]:
+            row = tk.Frame(left, bg=CARD_BG_ALT, highlightthickness=1, highlightbackground=BORDER)
+            row.pack(fill="x", padx=14, pady=4)
+            label = tk.Label(row, text=title, font=FONT_LABEL, fg=TEXT_MUTED, bg=CARD_BG_ALT)
+            label.pack(anchor="w", padx=10, pady=8)
+            self._dashboard_check_rows[key] = label
+
+        tk.Label(right, text="Latest Run", font=("Segoe UI Semibold", 12), fg=TEXT_PRIMARY, bg=CARD_BG).pack(anchor="w", padx=14, pady=(12, 8))
+        latest_box = tk.Frame(right, bg=LOG_BG, highlightthickness=1, highlightbackground=BORDER)
+        latest_box.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+
+        top_row = tk.Frame(latest_box, bg=LOG_BG)
+        top_row.pack(fill="x", padx=10, pady=(10, 4))
+        self._latest_status_badge = tk.Label(
+            top_row,
+            text="NO RUN",
+            font=("Consolas", 8, "bold"),
+            fg=TEXT_PRIMARY,
+            bg=CARD_BG_ALT,
+            padx=8,
+            pady=3,
+        )
+        self._latest_status_badge.pack(side="left")
+        tk.Label(top_row, textvariable=self._latest_run_when_var, font=FONT_LABEL, fg=TEXT_MUTED, bg=LOG_BG).pack(side="left", padx=(10, 0))
+
+        info = tk.Frame(latest_box, bg=LOG_BG)
+        info.pack(fill="x", padx=10)
+
+        def _meta_row(label_text, value_var):
+            row = tk.Frame(info, bg=LOG_BG)
+            row.pack(fill="x", pady=1)
+            tk.Label(row, text=label_text, font=("Consolas", 8), fg=TEXT_FAINT, bg=LOG_BG, width=10, anchor="w").pack(side="left")
+            tk.Label(row, textvariable=value_var, font=FONT_LABEL, fg=TEXT_PRIMARY, bg=LOG_BG, anchor="w", justify="left", wraplength=360).pack(side="left", fill="x", expand=True)
+
+        _meta_row("Modules", self._latest_run_modules_var)
+        _meta_row("Source", self._latest_run_file_var)
+        _meta_row("Runtime", self._latest_run_runtime_var)
+        _meta_row("FPS", self._latest_run_fps_var)
+        _meta_row("Confidence", self._latest_run_conf_var)
+
+        tk.Label(latest_box, text="Details", font=("Segoe UI Semibold", 10), fg=TEXT_PRIMARY, bg=LOG_BG).pack(anchor="w", padx=10, pady=(8, 4))
+        self._latest_details_text = tk.Text(latest_box, bg=CARD_BG_ALT, fg=TEXT_PRIMARY, font=FONT_LOG, bd=0, height=7, wrap="word")
+        self._latest_details_text.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self._latest_details_text.insert("1.0", "Waiting for system check...")
+        self._latest_details_text.config(state="disabled")
+        self._refresh_dashboard_state()
         return view
+
+    def _refresh_dashboard_state(self):
+        history = self._load_pipeline_history()
+        total_runs = len(history)
+        success_runs = len([h for h in history if h.get("status") == "success"])
+        fail_runs = len([h for h in history if h.get("status") == "failed"])
+        last_run = history[-1] if history else None
+
+        if hasattr(self, "_db_total_runs_var"):
+            self._db_total_runs_var.set(str(total_runs))
+        if hasattr(self, "_db_success_runs_var"):
+            self._db_success_runs_var.set(str(success_runs))
+        if hasattr(self, "_db_fail_runs_var"):
+            self._db_fail_runs_var.set(str(fail_runs))
+        if hasattr(self, "_db_dl_var"):
+            self._db_dl_var.set("Ready" if self._system_health.get("dl_module", DL_OK) else "Unavailable")
+        if hasattr(self, "_db_ml_var"):
+            self._db_ml_var.set("Ready" if self._system_health.get("ml_module", ML_OK) else "Unavailable")
+
+        if hasattr(self, "_latest_run_when_var"):
+            if last_run:
+                status = str(last_run.get("status", "unknown")).upper()
+                stamp = str(last_run.get("timestamp", "--"))
+                modules = last_run.get("modules", []) or []
+                src = str(last_run.get("source_file", "--"))
+                runtime = last_run.get("runtime_s", None)
+                fps = last_run.get("fps", None)
+                conf = str(last_run.get("confidence_label", "Accuracy: n/a"))
+                details = str(last_run.get("details", "No details available."))
+
+                self._latest_run_when_var.set(stamp)
+                self._latest_run_modules_var.set(", ".join(modules) if modules else "--")
+                self._latest_run_file_var.set(os.path.basename(src) if src else "--")
+                self._latest_run_runtime_var.set(f"{runtime:.3f}s" if isinstance(runtime, (int, float)) else "--")
+                self._latest_run_fps_var.set(f"{fps:.2f}" if isinstance(fps, (int, float)) else "--")
+                self._latest_run_conf_var.set(conf.replace("Accuracy: ", ""))
+
+                badge_bg = "#1b4332" if status == "SUCCESS" else ("#5c1d1d" if status == "FAILED" else CARD_BG_ALT)
+                badge_fg = "#00e5a0" if status == "SUCCESS" else ("#ff5f7a" if status == "FAILED" else TEXT_PRIMARY)
+                self._latest_status_badge.config(text=status, bg=badge_bg, fg=badge_fg)
+
+                self._latest_details_text.config(state="normal")
+                self._latest_details_text.delete("1.0", "end")
+                self._latest_details_text.insert("1.0", details)
+                self._latest_details_text.config(state="disabled")
+            else:
+                self._latest_run_when_var.set("--")
+                self._latest_run_modules_var.set("--")
+                self._latest_run_file_var.set("--")
+                self._latest_run_runtime_var.set("--")
+                self._latest_run_fps_var.set("--")
+                self._latest_run_conf_var.set("--")
+                self._latest_status_badge.config(text="NO RUN", bg=CARD_BG_ALT, fg=TEXT_PRIMARY)
+                self._latest_details_text.config(state="normal")
+                self._latest_details_text.delete("1.0", "end")
+                self._latest_details_text.insert("1.0", "No pipeline runs recorded yet.\nUse Vision Studio to run your first inference.")
+                self._latest_details_text.config(state="disabled")
+
+        if hasattr(self, "_dashboard_check_rows"):
+            checklist_states = {
+                "vision_pipeline": self._system_health.get("dl_module", DL_OK) and self._system_health.get("opencv", CV2_OK) and self._system_health.get("yolo_weights", False),
+                "data_lab": self._system_health.get("ml_module", ML_OK) and self._system_health.get("pandas", PANDAS_OK),
+                "drag_drop": self._system_health.get("tkdnd_backend", False) and self._drag_drop_ready,
+                "history_store": self._system_health.get("public_writable", False),
+            }
+            for key, label in self._dashboard_check_rows.items():
+                state = checklist_states.get(key, False)
+                dot = "●" if state else "○"
+                color = "#00e5a0" if state else ACCENT3
+                title = label.cget("text").split(" ", 1)[1] if " " in label.cget("text") and label.cget("text").startswith(("●", "○")) else label.cget("text")
+                label.config(text=f"{dot} {title}", fg=color)
 
     def _status_card(self, parent, title, sub, color, ok):
         card = tk.Frame(parent, bg=CARD_BG, width=240, height=100)
@@ -312,76 +774,634 @@ class AutoDriveApp(tb.Window):
     def _build_vision_view(self, parent):
         view = tk.Frame(parent, bg=CONTENT_BG)
 
-        topbar = tk.Frame(view, bg=CONTENT_BG)
-        topbar.pack(fill="x", padx=30, pady=(28, 0))
-        tk.Label(topbar, text="👁️  Vision Studio", font=FONT_HEADING,
-                 fg=TEXT_PRIMARY, bg=CONTENT_BG).pack(side="left")
+        canvas = tk.Canvas(view, bg=CONTENT_BG, highlightthickness=0)
+        scrollbar = tk.Scrollbar(view, orient="vertical", command=canvas.yview,
+                                 bg=CONTENT_BG, troughcolor=CONTENT_BG, bd=0)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
 
-        body = tk.Frame(view, bg=CONTENT_BG)
-        body.pack(fill="both", expand=True, padx=30, pady=14)
+        shell = tk.Frame(canvas, bg=CONTENT_BG)
+        shell_window = canvas.create_window((0, 0), window=shell, anchor="nw")
 
-        img_area = tk.Frame(body, bg=CARD_BG, bd=0)
-        img_area.pack(side="left", fill="both", expand=True, padx=(0, 16))
+        def _on_configure(_e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.itemconfig(shell_window, width=canvas.winfo_width())
 
-        tk.Label(img_area, text="▸ IMAGE DISPLAY", font=("Courier New", 8, "bold"),
-                 fg=ACCENT, bg=CARD_BG).pack(anchor="w", padx=14, pady=(12, 0))
-        tk.Frame(img_area, bg="#1e2230", height=1).pack(fill="x", padx=14, pady=6)
+        def _on_canvas_configure(e):
+            canvas.itemconfig(shell_window, width=e.width)
 
-        self._img_label = tk.Label(img_area,
-                                   text="No image loaded.\nResults will appear here.",
-                                   font=FONT_SUB, fg=TEXT_MUTED, bg=CARD_BG,
+        def _on_mousewheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+
+        shell.bind("<Configure>", _on_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+        canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+
+        topbar = tk.Frame(shell, bg=CONTENT_BG)
+        topbar.pack(fill="x", padx=30, pady=(24, 0))
+        tk.Label(topbar, text="Vision Studio", font=FONT_HEADING,
+                 fg=TEXT_PRIMARY, bg=CONTENT_BG).pack(anchor="w")
+        tk.Label(topbar,
+                 text="Upload a road scene and run selected perception modules with one production-style pipeline trigger.",
+                 font=FONT_SUB, fg=TEXT_MUTED, bg=CONTENT_BG).pack(anchor="w", pady=(4, 0))
+
+        workspace_card = tk.Frame(shell, bg=CARD_BG, highlightthickness=1, highlightbackground=BORDER)
+        workspace_card.pack(fill="both", expand=True, padx=30, pady=(14, 10))
+
+        self._drop_area = tk.Frame(workspace_card, bg=CARD_BG_ALT, highlightthickness=1, highlightbackground=BORDER)
+        self._drop_area.pack(fill="both", expand=True, padx=18, pady=(18, 10))
+
+        tk.Label(self._drop_area, text="Drop Image Here", font=("Segoe UI Semibold", 15),
+                 fg=TEXT_PRIMARY, bg=CARD_BG_ALT).pack(pady=(28, 6))
+        tk.Label(self._drop_area,
+                 textvariable=self._drop_hint_var,
+                 font=FONT_LABEL, fg=TEXT_MUTED, bg=CARD_BG_ALT).pack()
+
+        upload_row = tk.Frame(self._drop_area, bg=CARD_BG_ALT)
+        upload_row.pack(pady=12)
+        tb.Button(upload_row, text="Browse Image", bootstyle="info-outline", command=self._cmd_upload_vision_image).pack(side="left", padx=5)
+        tb.Button(upload_row, text="Use Sample", bootstyle="secondary-outline", command=self._cmd_load_sample_image).pack(side="left", padx=5)
+
+        self._img_label = tk.Label(self._drop_area,
+                                   text="No image loaded yet.",
+                                   font=FONT_SUB, fg=TEXT_FAINT, bg=CARD_BG_ALT,
                                    justify="center")
-        self._img_label.pack(expand=True)
+        self._img_label.pack(fill="both", expand=True, padx=14, pady=(4, 16))
 
-        action_panel = tk.Frame(body, bg=CONTENT_BG, width=300)
-        action_panel.pack(side="right", fill="y", padx=(20, 0))
-        action_panel.pack_propagate(False)
+        cta_zone = tk.Frame(workspace_card, bg=CARD_BG)
+        cta_zone.pack(fill="x", padx=18, pady=(0, 14))
+        self._run_btn = tk.Button(
+            cta_zone,
+            text="🚀 Run Full Pipeline",
+            font=("Segoe UI Semibold", 13),
+            fg="#031722",
+            bg=ACCENT,
+            activebackground="#7be8ff",
+            activeforeground="#031722",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=20,
+            pady=12,
+            command=self._cmd_full_pipeline,
+        )
+        self._run_btn.pack(fill="x")
 
-        tk.Label(action_panel, text="▸ MODULES", font=("Courier New", 8, "bold"),
-                 fg=ACCENT, bg=CONTENT_BG).pack(anchor="w", pady=(4, 10))
+        self._pipeline_status_var = tk.StringVar(value="Status: Idle")
+        tk.Label(cta_zone, textvariable=self._pipeline_status_var,
+                 font=FONT_LABEL, fg=TEXT_MUTED, bg=CARD_BG).pack(anchor="w", pady=(6, 2))
+        self._pipeline_progress = tb.Progressbar(cta_zone, bootstyle="info-striped", mode="indeterminate")
+        self._pipeline_progress.pack(fill="x")
 
-        vision_btns = [
-            ("🛑  Traffic Sign Recognition", ACCENT2,   self._cmd_traffic_sign),
-            ("⚡  Train Model (Live Demo)",   "#e17055", self._cmd_train_cnn_demo),
-            ("📈  View Training History",     "#2d3436", self._cmd_view_training_graph),
-            ("🚶  Pedestrian Detection",      ACCENT3,   self._cmd_pedestrian),
-            ("🛣️  Lane Detection (Basic)",    "#a78bfa", self._cmd_lane),
-            ("🚀  Full Autonomous Pipeline",  ACCENT,    self._cmd_full_pipeline),
-        ]
-        for text, color, cmd in vision_btns:
-            self._action_btn(action_panel, text, color, cmd)
+        bottom = tk.Frame(shell, bg=CONTENT_BG)
+        bottom.pack(fill="both", expand=True, padx=30, pady=(0, 18))
+
+        left_panel = tk.Frame(bottom, bg=CARD_BG, highlightthickness=1, highlightbackground=BORDER)
+        left_panel.pack(side="left", fill="both", expand=True, padx=(0, 8))
+        right_panel = tk.Frame(bottom, bg=CARD_BG, highlightthickness=1, highlightbackground=BORDER)
+        right_panel.pack(side="left", fill="both", expand=True, padx=(8, 0))
+
+        tk.Label(left_panel, text="Modules", font=("Segoe UI Semibold", 12), fg=TEXT_PRIMARY, bg=CARD_BG).pack(anchor="w", padx=14, pady=(12, 8))
+        self._module_traffic = tk.BooleanVar(value=True)
+        self._module_pedestrian = tk.BooleanVar(value=True)
+        self._module_lane = tk.BooleanVar(value=True)
+
+        for label, var, color in [
+            ("Traffic Sign Detection", self._module_traffic, ACCENT2),
+            ("Pedestrian Detection", self._module_pedestrian, ACCENT3),
+            ("Lane Detection", self._module_lane, ACCENT4),
+        ]:
+            row = tk.Frame(left_panel, bg=CARD_BG_ALT, highlightthickness=1, highlightbackground=BORDER)
+            row.pack(fill="x", padx=14, pady=5)
+            cb = tk.Checkbutton(
+                row,
+                text=label,
+                variable=var,
+                onvalue=True,
+                offvalue=False,
+                bg=CARD_BG_ALT,
+                fg=TEXT_PRIMARY,
+                activebackground=CARD_BG_ALT,
+                activeforeground=TEXT_PRIMARY,
+                selectcolor="#132036",
+                font=FONT_LABEL,
+                anchor="w",
+                padx=8,
+            )
+            cb.pack(side="left", fill="x", expand=True, pady=7)
+            tk.Frame(row, bg=color, width=4).pack(side="right", fill="y")
+
+        tk.Label(left_panel, text="Secondary Actions", font=("Segoe UI Semibold", 11), fg=TEXT_MUTED, bg=CARD_BG).pack(anchor="w", padx=14, pady=(12, 6))
+        actions = tk.Frame(left_panel, bg=CARD_BG)
+        actions.pack(fill="x", padx=14, pady=(0, 14))
+        tb.Button(actions, text="Train Model", bootstyle="warning-outline", command=self._cmd_train_cnn_demo).pack(side="left", padx=(0, 8))
+        tb.Button(actions, text="Training History", bootstyle="secondary-outline", command=self._cmd_view_training_graph).pack(side="left", padx=(0, 8))
+        tb.Button(actions, text="Run History", bootstyle="info-outline", command=self._cmd_view_pipeline_history).pack(side="left")
+
+        tk.Label(right_panel, text="Output", font=("Segoe UI Semibold", 12), fg=TEXT_PRIMARY, bg=CARD_BG).pack(anchor="w", padx=14, pady=(12, 8))
+        output_stage = tk.Frame(right_panel, bg=CARD_BG_ALT, highlightthickness=1, highlightbackground=BORDER, height=220)
+        output_stage.pack(fill="x", padx=14, pady=(0, 10))
+        output_stage.pack_propagate(False)
+        self._output_img_label = tk.Label(
+            output_stage,
+            text="Processed output will appear here after running the pipeline.",
+            bg=CARD_BG_ALT,
+            fg=TEXT_MUTED,
+            font=FONT_LABEL,
+            justify="center",
+            wraplength=500,
+        )
+        self._output_img_label.pack(fill="both", expand=True)
+
+        metrics_row = tk.Frame(right_panel, bg=CARD_BG)
+        metrics_row.pack(fill="x", padx=14)
+        self._metric_fps = tk.StringVar(value="FPS: --")
+        self._metric_acc = tk.StringVar(value="Accuracy: --")
+        self._metric_status = tk.StringVar(value="Detections: --")
+        tk.Label(metrics_row, textvariable=self._metric_fps, font=FONT_LABEL, fg=ACCENT, bg=CARD_BG).pack(side="left", padx=(0, 14))
+        tk.Label(metrics_row, textvariable=self._metric_acc, font=FONT_LABEL, fg=ACCENT3, bg=CARD_BG).pack(side="left", padx=(0, 14))
+        tk.Label(metrics_row, textvariable=self._metric_status, font=FONT_LABEL, fg=TEXT_PRIMARY, bg=CARD_BG).pack(side="left")
+
+        tk.Label(right_panel, text="Analysis", font=("Segoe UI Semibold", 10), fg=TEXT_PRIMARY, bg=CARD_BG).pack(anchor="w", padx=14, pady=(10, 4))
+        self._result_text = tk.Text(right_panel, height=7, bg=LOG_BG, fg=TEXT_PRIMARY, font=FONT_LOG, bd=0, wrap="word")
+        self._result_text.pack(fill="x", padx=14, pady=(10, 14))
+        self._result_text.insert("1.0", "Detection summary and confidence logs will appear here.")
+        self._result_text.config(state="disabled")
+        self._setup_drop_target()
 
         return view
-
-    def _action_btn(self, parent, text, color, command):
-        outer = tk.Frame(parent, bg=color, pady=1)
-        outer.pack(fill="x", pady=6)
-
-        btn = tk.Label(outer, text=text, font=("Courier New", 10),
-                       fg=TEXT_PRIMARY, bg=CARD_BG,
-                       anchor="w", padx=14, pady=11, cursor="hand2")
-        btn.pack(fill="x")
-
-        def on_enter(e): btn.config(bg=NAV_ACTIVE)
-        def on_leave(e): btn.config(bg=CARD_BG)
-        def on_click(e): command()
-
-        btn.bind("<Enter>", on_enter)
-        btn.bind("<Leave>", on_leave)
-        btn.bind("<Button-1>", on_click)
 
     # ─────────────────────────────────────────
     # ── COMMANDS: VISION & TRAINING ──────────
     # ─────────────────────────────────────────
+    def _setup_drop_target(self):
+        if not DND_OK:
+            self._drag_drop_ready = False
+            self._drop_hint_var.set("Install tkinterdnd2 to enable drag and drop. Browse still works.")
+            self._refresh_system_status(force_log=False)
+            return
+        if not self._is_tkdnd_backend_available():
+            self._drag_drop_ready = False
+            self._drop_hint_var.set("TkDND backend is unavailable in this runtime. Browse still works.")
+            self._refresh_system_status(force_log=False)
+            return
+        if not hasattr(self._drop_area, "drop_target_register"):
+            self._drag_drop_ready = False
+            self._drop_hint_var.set("Drag/drop package found, but DnD hooks are unavailable in this runtime.")
+            self._refresh_system_status(force_log=False)
+            return
+
+        try:
+            for widget in (self._drop_area, self._img_label):
+                widget.drop_target_register(DND_FILES)
+                widget.dnd_bind("<<Drop>>", self._on_drop_image)
+            self._drag_drop_ready = True
+            self._drop_hint_var.set("Drag and drop enabled. You can also click Browse Image.")
+            self.log("[OK] Drag-and-drop ready in Vision Studio.")
+            self._refresh_system_status(force_log=False)
+        except Exception as e:
+            self._drag_drop_ready = False
+            self._drop_hint_var.set("Drag/drop setup failed. Browse Image is still available.")
+            self.log(f"[INFO] Drag-and-drop disabled: {e}")
+            self._refresh_system_status(force_log=False)
+
+    def _on_drop_image(self, event):
+        path = self._extract_dropped_file(getattr(event, "data", ""))
+        if not path:
+            self.log("[WARN] Dropped item was not a supported image file.")
+            return
+        self._load_vision_input(path, source="drop")
+
+    def _extract_dropped_file(self, data):
+        if not data:
+            return ""
+        try:
+            candidates = list(self.tk.splitlist(data))
+        except Exception:
+            candidates = [data]
+
+        for item in candidates:
+            path = item.strip().strip("{}")
+            if os.path.isfile(path) and path.lower().endswith((".jpg", ".jpeg", ".png", ".zip")):
+                return path
+        return ""
+
+    def _load_vision_input(self, file_path, source="browse"):
+        resolved = self._resolve_vision_input(file_path)
+        if not resolved:
+            return
+        self._vision_input_path = resolved
+        self._update_upload_preview(resolved)
+        self._pipeline_status_var.set(f"Status: Ready ({os.path.basename(resolved)})")
+        self.log(f"[INFO] Input image loaded via {source}: {resolved}")
+
+    def _cmd_upload_vision_image(self):
+        file = filedialog.askopenfilename(
+            title="Select Drive Image",
+            filetypes=[("Images and ZIP", "*.jpg *.jpeg *.png *.zip")],
+        )
+        if not file:
+            return
+        self._load_vision_input(file, source="browse")
+
+    def _cmd_load_sample_image(self):
+        candidates = []
+        for root in ["Public", "."]:
+            if not os.path.exists(root):
+                continue
+            for name in os.listdir(root):
+                if name.lower().endswith((".jpg", ".jpeg", ".png", ".zip")):
+                    candidates.append(os.path.join(root, name))
+        if not candidates:
+            messagebox.showinfo("Sample Image", "No sample image found in Public or project root.")
+            return
+        self._load_vision_input(candidates[0], source="sample")
+
+    def _normalize_confidence(self, value):
+        if value is None:
+            return None
+        try:
+            conf = float(value)
+            if conf > 1.0:
+                conf /= 100.0
+            return max(0.0, min(conf, 1.0))
+        except Exception:
+            return None
+
+    def _extract_confidence(self, *text_parts):
+        for part in text_parts:
+            if part is None:
+                continue
+            text = str(part)
+
+            matches_pct = re.findall(r"(\d+(?:\.\d+)?)\s*%", text)
+            if matches_pct:
+                return self._normalize_confidence(max(float(v) for v in matches_pct))
+
+            matches_named = re.findall(
+                r"(?i)(?:conf(?:idence)?|score|prob(?:ability)?|acc(?:uracy)?)\s*[:=]?\s*(0(?:\.\d+)?|1(?:\.0+)?)",
+                text,
+            )
+            if matches_named:
+                return self._normalize_confidence(matches_named[0])
+
+            matches_bracket = re.findall(r"\((0(?:\.\d+)?|1(?:\.0+)?)\)", text)
+            if matches_bracket:
+                return self._normalize_confidence(matches_bracket[0])
+        return None
+
+    def _format_accuracy_metric(self, confidence):
+        if confidence is None:
+            return "Accuracy: n/a"
+        return f"Accuracy: {confidence * 100:.1f}%"
+
+    def _extract_detection_count(self, text):
+        if not text:
+            return None
+        match = re.search(r"(?i)(\d+)\s+(?:pedestrians?|persons?|objects?|detections?)", str(text))
+        if match:
+            return int(match.group(1))
+        return None
+
+    def _normalize_traffic_sign_result(self, result):
+        label = str(result)
+        confidence = None
+        if isinstance(result, dict):
+            label = str(result.get("label") or result.get("class") or result.get("prediction") or result)
+            confidence = self._normalize_confidence(
+                result.get("confidence") or result.get("probability") or result.get("score")
+            )
+        elif isinstance(result, (tuple, list)) and result:
+            label = str(result[0])
+            if len(result) > 1:
+                confidence = self._normalize_confidence(result[1])
+
+        if confidence is None:
+            confidence = self._extract_confidence(result)
+        return label, confidence
+
+    def _load_pipeline_history(self):
+        if not os.path.exists(self._pipeline_history_path):
+            return []
+        try:
+            with open(self._pipeline_history_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, list):
+                return data
+        except Exception as e:
+            self.log(f"[WARN] Could not read run history: {e}")
+        return []
+
+    def _append_pipeline_history(self, entry):
+        history = self._load_pipeline_history()
+        history.append(entry)
+        history = history[-250:]
+        try:
+            with open(self._pipeline_history_path, "w", encoding="utf-8") as handle:
+                json.dump(history, handle, indent=2)
+            self._refresh_dashboard_state()
+        except Exception as e:
+            self.log(f"[WARN] Could not save run history: {e}")
+
+    def _cmd_view_pipeline_history(self):
+        history = self._load_pipeline_history()
+        if not history:
+            messagebox.showinfo("Run History", "No Vision Studio runs recorded yet.")
+            return
+
+        win = tk.Toplevel(self)
+        win.title("Vision Studio Run History")
+        win.geometry("920x520")
+        win.configure(bg=CARD_BG)
+
+        container = tk.Frame(win, bg=CARD_BG)
+        container.pack(fill="both", expand=True, padx=12, pady=12)
+
+        left = tk.Frame(container, bg=CARD_BG_ALT, highlightthickness=1, highlightbackground=BORDER, width=340)
+        left.pack(side="left", fill="y")
+        left.pack_propagate(False)
+        right = tk.Frame(container, bg=LOG_BG, highlightthickness=1, highlightbackground=BORDER)
+        right.pack(side="left", fill="both", expand=True, padx=(10, 0))
+
+        tk.Label(left, text="Recent Pipeline Runs", font=("Segoe UI Semibold", 11), fg=TEXT_PRIMARY, bg=CARD_BG_ALT).pack(anchor="w", padx=10, pady=(10, 8))
+        filters = tk.Frame(left, bg=CARD_BG_ALT)
+        filters.pack(fill="x", padx=10, pady=(0, 8))
+
+        status_var = tk.StringVar(value="all")
+        module_var = tk.StringVar(value="all")
+        date_var = tk.StringVar(value="")
+        search_var = tk.StringVar(value="")
+        module_values = sorted({m for run in history for m in run.get("modules", [])})
+
+        tk.Label(filters, text="Status", font=("Segoe UI", 8), fg=TEXT_MUTED, bg=CARD_BG_ALT).grid(row=0, column=0, sticky="w")
+        tk.Label(filters, text="Module", font=("Segoe UI", 8), fg=TEXT_MUTED, bg=CARD_BG_ALT).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        status_combo = tb.Combobox(filters, textvariable=status_var, values=["all", "success", "failed"], state="readonly", width=12, bootstyle="secondary")
+        status_combo.grid(row=1, column=0, sticky="w")
+        module_combo = tb.Combobox(filters, textvariable=module_var, values=["all", *module_values], state="readonly", width=14, bootstyle="secondary")
+        module_combo.grid(row=1, column=1, sticky="w", padx=(8, 0))
+
+        tk.Label(filters, text="Date (YYYY-MM-DD)", font=("Segoe UI", 8), fg=TEXT_MUTED, bg=CARD_BG_ALT).grid(row=2, column=0, sticky="w", pady=(8, 0))
+        tk.Label(filters, text="Search", font=("Segoe UI", 8), fg=TEXT_MUTED, bg=CARD_BG_ALT).grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        date_entry = tb.Entry(filters, textvariable=date_var, bootstyle="secondary")
+        date_entry.grid(row=3, column=0, sticky="we")
+        search_entry = tb.Entry(filters, textvariable=search_var, bootstyle="secondary")
+        search_entry.grid(row=3, column=1, sticky="we", padx=(8, 0))
+        filters.grid_columnconfigure(0, weight=1)
+        filters.grid_columnconfigure(1, weight=1)
+
+        toolbar = tk.Frame(left, bg=CARD_BG_ALT)
+        toolbar.pack(fill="x", padx=10, pady=(0, 8))
+
+        listbox = tk.Listbox(
+            left,
+            bg=CARD_BG_ALT,
+            fg=TEXT_PRIMARY,
+            selectbackground=NAV_ACTIVE,
+            bd=0,
+            highlightthickness=0,
+            font=FONT_LOG,
+        )
+        listbox.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        detail_top = tk.Frame(right, bg=LOG_BG)
+        detail_top.pack(fill="x", padx=10, pady=(10, 4))
+        run_status_badge = tk.Label(
+            detail_top,
+            text="NO RUN",
+            font=("Consolas", 8, "bold"),
+            fg=TEXT_PRIMARY,
+            bg=CARD_BG_ALT,
+            padx=8,
+            pady=3,
+        )
+        run_status_badge.pack(side="left")
+
+        run_when_var = tk.StringVar(value="--")
+        run_modules_var = tk.StringVar(value="--")
+        run_source_var = tk.StringVar(value="--")
+        run_runtime_var = tk.StringVar(value="--")
+        run_fps_var = tk.StringVar(value="--")
+        run_conf_var = tk.StringVar(value="--")
+
+        tk.Label(detail_top, textvariable=run_when_var, font=FONT_LABEL, fg=TEXT_MUTED, bg=LOG_BG).pack(side="left", padx=(10, 0))
+
+        detail_meta = tk.Frame(right, bg=LOG_BG)
+        detail_meta.pack(fill="x", padx=10)
+
+        def _meta_row(label_text, value_var):
+            row = tk.Frame(detail_meta, bg=LOG_BG)
+            row.pack(fill="x", pady=1)
+            tk.Label(row, text=label_text, font=("Consolas", 8), fg=TEXT_FAINT, bg=LOG_BG, width=10, anchor="w").pack(side="left")
+            tk.Label(row, textvariable=value_var, font=FONT_LABEL, fg=TEXT_PRIMARY, bg=LOG_BG, anchor="w", justify="left", wraplength=420).pack(side="left", fill="x", expand=True)
+
+        _meta_row("Modules", run_modules_var)
+        _meta_row("Source", run_source_var)
+        _meta_row("Runtime", run_runtime_var)
+        _meta_row("FPS", run_fps_var)
+        _meta_row("Confidence", run_conf_var)
+
+        tk.Label(right, text="Details", font=("Segoe UI Semibold", 10), fg=TEXT_PRIMARY, bg=LOG_BG).pack(anchor="w", padx=10, pady=(8, 4))
+        detail = tk.Text(right, bg=CARD_BG_ALT, fg=TEXT_PRIMARY, font=FONT_LOG, bd=0, wrap="word", height=8)
+        detail.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        runs = list(reversed(history))
+        filtered_runs = []
+
+        def _matches(run):
+            status_filter = status_var.get().strip().lower()
+            module_filter = module_var.get().strip().lower()
+            date_filter = date_var.get().strip()
+            search_filter = search_var.get().strip().lower()
+
+            if status_filter != "all" and run.get("status", "").lower() != status_filter:
+                return False
+
+            run_modules = [m.lower() for m in run.get("modules", [])]
+            if module_filter != "all" and module_filter not in run_modules:
+                return False
+
+            stamp = str(run.get("timestamp", ""))
+            if date_filter and date_filter not in stamp:
+                return False
+
+            if search_filter:
+                haystack = " ".join(
+                    [
+                        str(run.get("details", "")),
+                        str(run.get("source_file", "")),
+                        ",".join(run.get("modules", [])),
+                        str(run.get("confidence_label", "")),
+                    ]
+                ).lower()
+                if search_filter not in haystack:
+                    return False
+
+            return True
+
+        def refresh_list(_event=None):
+            filtered_runs.clear()
+            listbox.delete(0, "end")
+            detail.config(state="normal")
+            detail.delete("1.0", "end")
+            detail.config(state="disabled")
+            run_status_badge.config(text="NO RUN", bg=CARD_BG_ALT, fg=TEXT_PRIMARY)
+            run_when_var.set("--")
+            run_modules_var.set("--")
+            run_source_var.set("--")
+            run_runtime_var.set("--")
+            run_fps_var.set("--")
+            run_conf_var.set("--")
+
+            for run in runs:
+                if _matches(run):
+                    filtered_runs.append(run)
+
+            for idx, run in enumerate(filtered_runs, start=1):
+                stamp = run.get("timestamp", "--:--:--")
+                status = run.get("status", "unknown")
+                modules = ",".join(run.get("modules", []))
+                listbox.insert("end", f"{idx:03d}  {stamp}  [{status}]  {modules}")
+
+            if filtered_runs:
+                listbox.selection_set(0)
+                on_select()
+            else:
+                detail.config(state="normal")
+                detail.insert("end", "No runs match the active filters.")
+                detail.config(state="disabled")
+
+        def on_select(_event=None):
+            selected = listbox.curselection()
+            if not selected:
+                return
+            run = filtered_runs[selected[0]]
+
+            status = str(run.get("status", "unknown")).upper()
+            stamp = str(run.get("timestamp", "--"))
+            modules = run.get("modules", []) or []
+            src = str(run.get("source_file", "--"))
+            runtime = run.get("runtime_s", None)
+            fps = run.get("fps", None)
+            conf = str(run.get("confidence_label", "Accuracy: n/a"))
+            details = str(run.get("details", "No details available."))
+
+            run_when_var.set(stamp)
+            run_modules_var.set(", ".join(modules) if modules else "--")
+            run_source_var.set(os.path.basename(src) if src else "--")
+            run_runtime_var.set(f"{runtime:.3f}s" if isinstance(runtime, (int, float)) else "--")
+            run_fps_var.set(f"{fps:.2f}" if isinstance(fps, (int, float)) else "--")
+            run_conf_var.set(conf.replace("Accuracy: ", ""))
+
+            badge_bg = "#1b4332" if status == "SUCCESS" else ("#5c1d1d" if status == "FAILED" else CARD_BG_ALT)
+            badge_fg = "#00e5a0" if status == "SUCCESS" else ("#ff5f7a" if status == "FAILED" else TEXT_PRIMARY)
+            run_status_badge.config(text=status, bg=badge_bg, fg=badge_fg)
+
+            detail.config(state="normal")
+            detail.delete("1.0", "end")
+            detail.insert("1.0", details)
+            detail.config(state="disabled")
+
+        def clear_filters():
+            status_var.set("all")
+            module_var.set("all")
+            date_var.set("")
+            search_var.set("")
+            refresh_list()
+
+        tb.Button(toolbar, text="Apply", bootstyle="info-outline", command=refresh_list).pack(side="left", padx=(0, 6))
+        tb.Button(toolbar, text="Reset", bootstyle="secondary-outline", command=clear_filters).pack(side="left")
+
+        listbox.bind("<<ListboxSelect>>", on_select)
+        status_combo.bind("<<ComboboxSelected>>", refresh_list)
+        module_combo.bind("<<ComboboxSelected>>", refresh_list)
+        date_entry.bind("<KeyRelease>", refresh_list)
+        search_entry.bind("<KeyRelease>", refresh_list)
+        refresh_list()
+
+    def _update_upload_preview(self, file_path):
+        if not PIL_OK:
+            self._img_label.config(text=f"Loaded: {os.path.basename(file_path)}")
+            return
+        try:
+            img = Image.open(file_path)
+            img.thumbnail((760, 300), Image.Resampling.LANCZOS)
+            self._vision_input_photo = ImageTk.PhotoImage(img)
+            self._img_label.config(image=self._vision_input_photo, text="")
+        except Exception as e:
+            self.log(f"[ERR] Failed to preview image: {e}")
+            self._img_label.config(text="Image loaded, but preview failed.")
+
+    def _update_output_preview(self, result_img):
+        if result_img is None:
+            self._output_img_label.config(text="No output image generated.", image="")
+            return
+        if not PIL_OK:
+            self._output_img_label.config(text="Output ready (install Pillow to preview).", image="")
+            return
+        try:
+            display = None
+            if hasattr(result_img, "shape") and CV2_OK:
+                bgr = result_img
+                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                display = Image.fromarray(rgb)
+            elif isinstance(result_img, Image.Image):
+                display = result_img
+
+            if display is None:
+                self._output_img_label.config(text="Output generated.", image="")
+                return
+
+            display.thumbnail((540, 260), Image.Resampling.LANCZOS)
+            self._vision_output_photo = ImageTk.PhotoImage(display)
+            self._output_img_label.config(image=self._vision_output_photo, text="")
+        except Exception as e:
+            self.log(f"[ERR] Failed to render output preview: {e}")
+            self._output_img_label.config(text="Output generated, but preview failed.", image="")
+
+    def _selected_modules(self):
+        selected = []
+        if self._module_traffic.get():
+            selected.append("traffic")
+        if self._module_pedestrian.get():
+            selected.append("pedestrian")
+        if self._module_lane.get():
+            selected.append("lane")
+        return selected
+
+    def _set_pipeline_running(self, running):
+        self._pipeline_running = running
+        if running:
+            self._pipeline_started_at = time.perf_counter()
+            self._run_btn.config(text="Processing...", state="disabled", bg="#79e8ff")
+            self._pipeline_progress.start(12)
+            self._pipeline_status_var.set("Status: Running pipeline")
+        else:
+            self._run_btn.config(text="🚀 Run Full Pipeline", state="normal", bg=ACCENT)
+            self._pipeline_progress.stop()
+
     def _cmd_traffic_sign(self):
-        self.log("[INFO] Traffic Sign Recognition — select an image...")
-        file = filedialog.askopenfilename(title="Select Sign Image", filetypes=[("Images", "*.jpg *.jpeg *.png")])
-        if not file: return
-        self.log(f"[INFO] Processing: {file}")
+        file = self._vision_input_path
+        if not file:
+            self._cmd_upload_vision_image()
+            file = self._vision_input_path
+        if not file:
+            return
+        self.log(f"[INFO] Traffic Sign Recognition on: {file}")
         try:
             result = predict_traffic_sign(file)
-            self.log(f"[OK]   Detected: {result}")
-            messagebox.showinfo("Traffic Sign", f"Detected:\n{result}")
+            label, confidence = self._normalize_traffic_sign_result(result)
+            self._metric_status.set("Detections: 1")
+            self._metric_acc.set(self._format_accuracy_metric(confidence))
+            self._result_text.config(state="normal")
+            self._result_text.delete("1.0", "end")
+            self._result_text.insert(
+                "end",
+                f"Traffic Sign Detection\nLabel: {label}\nConfidence: {self._format_accuracy_metric(confidence).split(': ', 1)[1]}",
+            )
+            self._result_text.config(state="disabled")
+            self.log(f"[OK] Detected traffic sign: {label}")
         except Exception as e:
             self.log(f"[ERR]  {e}")
             messagebox.showerror("Error", str(e))
@@ -478,28 +1498,38 @@ class AutoDriveApp(tb.Window):
             tk.Label(popup, text="Pillow (PIL) missing.", fg=ACCENT2, bg=CARD_BG).pack()
 
     def _cmd_pedestrian(self):
-        self.log("[INFO] Pedestrian Detection — select an image...")
-        file = filedialog.askopenfilename(title="Select Street Image", filetypes=[("Images", "*.jpg *.jpeg *.png")])
-        if not file: return
+        file = self._vision_input_path
+        if not file:
+            self._cmd_upload_vision_image()
+            file = self._vision_input_path
+        if not file:
+            return
+        self.log("[INFO] Pedestrian Detection started")
         self.log(f"[INFO] Processing: {file}")
         try:
             result_img, status = detect_pedestrians(file)
+            confidence = self._extract_confidence(status)
+            detections = self._extract_detection_count(status)
+            self._update_output_preview(result_img)
+            self._metric_acc.set(self._format_accuracy_metric(confidence))
+            self._metric_status.set(f"Detections: {detections if detections is not None else 'n/a'}")
+            self._result_text.config(state="normal")
+            self._result_text.delete("1.0", "end")
+            self._result_text.insert("end", f"Pedestrian Detection\n{status}")
+            self._result_text.config(state="disabled")
             self.log(f"[OK]   {status}")
-            if CV2_OK and result_img is not None:
-                import cv2
-                cv2.imshow(f"Pedestrian Detection — {status}", result_img)
-                cv2.waitKey(0)
-                cv2.destroyAllWindows()
-            messagebox.showinfo("YOLOv8 Report", status)
         except Exception as e:
             self.log(f"[ERR]  {e}")
             messagebox.showerror("Error", str(e))
 
     def _cmd_lane(self):
-        self.log("[INFO] Lane Detection (Basic) — select an image...")
-        file = filedialog.askopenfilename(title="Select Drive Image", 
-                                          filetypes=[("Images", "*.jpg *.jpeg *.png")])
-        if not file: return
+        file = self._vision_input_path
+        if not file:
+            self._cmd_upload_vision_image()
+            file = self._vision_input_path
+        if not file:
+            return
+        self.log("[INFO] Lane Detection (Basic) started")
         self.log(f"[INFO] Processing: {file}")
         
         try:
@@ -513,52 +1543,120 @@ class AutoDriveApp(tb.Window):
                 final_img = result    # It was just an image
             
             self.log("[OK]   Lane detection complete.")
-            
-            if CV2_OK and final_img is not None:
-                import cv2
-                cv2.imshow("Lane Detection (Basic)", final_img)
-                cv2.waitKey(0)
-                cv2.destroyAllWindows()
-            else:
-                messagebox.showerror("Error", "Result image is empty or OpenCV missing.")
+            self._update_output_preview(final_img)
+            self._metric_acc.set("Accuracy: lane model")
+            self._metric_status.set("Detections: lane overlay")
+            self._result_text.config(state="normal")
+            self._result_text.delete("1.0", "end")
+            self._result_text.insert("end", "Lane Detection\nLane overlays generated successfully.")
+            self._result_text.config(state="disabled")
                 
         except Exception as e:
             self.log(f"[ERR]  {e}")
             messagebox.showerror("Error", f"Lane Detection Failed:\n{str(e)}")
 
     def _cmd_full_pipeline(self):
-        self.log("[INFO] Full Autonomous Pipeline — select an image...")
-        file = filedialog.askopenfilename(title="Select Drive Image", filetypes=[("Images", "*.jpg *.jpeg *.png")])
-        if not file: return
+        if self._pipeline_running:
+            return
+        file = self._vision_input_path
+        if not file:
+            self._cmd_upload_vision_image()
+            file = self._vision_input_path
+        if not file:
+            return
+
+        selected = self._selected_modules()
+        if not selected:
+            messagebox.showinfo("Modules", "Select at least one module before running.")
+            return
+
         self.log(f"[INFO] Running pipeline on: {file}")
-        popup = tk.Toplevel(self)
-        popup.title("Processing")
-        popup.geometry("300x100")
-        popup.configure(bg=CARD_BG)
-        tk.Label(popup, text="Running AI Models…\nPlease wait.", font=FONT_SUB, fg=TEXT_PRIMARY, bg=CARD_BG).pack(expand=True)
-        self.update()
+        self.log(f"[INFO] Modules: {', '.join(selected)}")
+        self._set_pipeline_running(True)
+
         def run():
             try:
-                result_img, status = run_advanced_pipeline(file)
-                self.after(0, lambda: self._pipeline_done(popup, result_img, status))
+                confidence = None
+                if len(selected) == 1 and selected[0] == "lane":
+                    result = run_basic_lane(file)
+                    result_img = result[0] if isinstance(result, (tuple, list)) else result
+                    status = "Lane detection complete"
+                elif len(selected) == 1 and selected[0] == "pedestrian":
+                    result_img, status = detect_pedestrians(file)
+                    confidence = self._extract_confidence(status)
+                elif len(selected) == 1 and selected[0] == "traffic":
+                    sign = predict_traffic_sign(file)
+                    label, confidence = self._normalize_traffic_sign_result(sign)
+                    result_img = None
+                    status = f"Traffic sign detected: {label}"
+                else:
+                    result_img, status = run_advanced_pipeline(file)
+                    confidence = self._extract_confidence(status)
+                self.after(0, lambda: self._pipeline_done(result_img, status, selected, confidence, file))
             except Exception as e:
-                self.after(0, lambda: self._pipeline_error(popup, str(e)))
+                self.after(0, lambda: self._pipeline_error(str(e), selected, file))
         threading.Thread(target=run, daemon=True).start()
 
-    def _pipeline_done(self, popup, result_img, status):
-        popup.destroy()
-        self.log(f"[OK]   Pipeline complete — {status}")
-        if CV2_OK and result_img is not None:
-            import cv2
-            cv2.imshow(f"Autonomous Vision System — {status}", result_img)
-            cv2.waitKey(0)
-            cv2.destroyAllWindows()
-        else:
-            messagebox.showinfo("Pipeline", status)
+    def _pipeline_done(self, result_img, status, selected, confidence, source_file):
+        self._set_pipeline_running(False)
+        elapsed = 0.0
+        if self._pipeline_started_at is not None:
+            elapsed = max(0.0001, time.perf_counter() - self._pipeline_started_at)
+        fps = 1.0 / elapsed
+        confidence_text = self._format_accuracy_metric(confidence)
+        detections = self._extract_detection_count(status)
 
-    def _pipeline_error(self, popup, msg):
-        popup.destroy()
+        self.log(f"[OK]   Pipeline complete — {status}")
+        self._pipeline_status_var.set("Status: Completed")
+        self._metric_fps.set(f"FPS: {fps:.1f}")
+        self._metric_acc.set(confidence_text)
+        self._metric_status.set(f"Detections: {detections if detections is not None else len(selected)}")
+        self._update_output_preview(result_img)
+
+        self._result_text.config(state="normal")
+        self._result_text.delete("1.0", "end")
+        self._result_text.insert(
+            "end",
+            (
+                f"Pipeline Summary\n"
+                f"Modules: {', '.join(selected)}\n"
+                f"Status: {status}\n"
+                f"{confidence_text}\n"
+                f"Runtime: {elapsed:.2f}s"
+            ),
+        )
+        self._result_text.config(state="disabled")
+        self._append_pipeline_history(
+            {
+                "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+                "source_file": source_file,
+                "modules": selected,
+                "status": "success",
+                "details": status,
+                "runtime_s": round(elapsed, 3),
+                "fps": round(fps, 2),
+                "confidence": round(confidence, 4) if confidence is not None else None,
+                "confidence_label": confidence_text,
+            }
+        )
+
+    def _pipeline_error(self, msg, selected, source_file):
+        self._set_pipeline_running(False)
+        self._pipeline_status_var.set("Status: Failed")
         self.log(f"[ERR]  {msg}")
+        self._append_pipeline_history(
+            {
+                "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+                "source_file": source_file,
+                "modules": selected,
+                "status": "failed",
+                "details": msg,
+                "runtime_s": None,
+                "fps": None,
+                "confidence": None,
+                "confidence_label": "Accuracy: n/a",
+            }
+        )
         messagebox.showerror("Error", msg)
 
     # ─────────────────────────────────────────
@@ -566,36 +1664,27 @@ class AutoDriveApp(tb.Window):
     # ─────────────────────────────────────────
     def _build_datalab_view(self, parent):
         view = tk.Frame(parent, bg=CONTENT_BG)
-        tk.Label(view, text="📊  Driving ML Lab",
-                 font=FONT_HEADING, fg=TEXT_PRIMARY, bg=CONTENT_BG
-                 ).pack(anchor="w", padx=30, pady=(24, 2))
-        tk.Label(view, text="Traffic-sign analytics pipeline — Select task → Prepare features → Train → Evaluate.",
-                 font=FONT_SUB, fg=TEXT_MUTED, bg=CONTENT_BG
-                 ).pack(anchor="w", padx=32, pady=(0, 14))
+        tk.Label(view, text="Data Lab", font=FONT_HEADING, fg=TEXT_PRIMARY, bg=CONTENT_BG).pack(anchor="w", padx=30, pady=(24, 2))
+        tk.Label(view, text="Structured ML workflow: ingest, prep, train, and evaluate with clear experiment controls.",
+                 font=FONT_SUB, fg=TEXT_MUTED, bg=CONTENT_BG).pack(anchor="w", padx=30, pady=(0, 12))
 
-        canvas = tk.Canvas(view, bg=CONTENT_BG, highlightthickness=0)
-        scrollbar = tk.Scrollbar(view, orient="vertical", command=canvas.yview,
-                                  bg=CONTENT_BG, troughcolor=CONTENT_BG, bd=0)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
+        workspace = tk.Frame(view, bg=CONTENT_BG)
+        workspace.pack(fill="both", expand=True, padx=30, pady=(0, 18))
 
-        pipeline = tk.Frame(canvas, bg=CONTENT_BG)
-        canvas_window = canvas.create_window((0, 0), window=pipeline, anchor="nw")
+        left_col = tk.Frame(workspace, bg=CONTENT_BG)
+        left_col.pack(side="left", fill="both", expand=True, padx=(0, 8))
+        tk.Frame(workspace, bg=BORDER, width=1).pack(side="left", fill="y", padx=4)
+        right_col = tk.Frame(workspace, bg=CONTENT_BG)
+        right_col.pack(side="left", fill="both", expand=True, padx=(8, 0))
 
-        def _on_configure(e):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-            canvas.itemconfig(canvas_window, width=canvas.winfo_width())
-        pipeline.bind("<Configure>", _on_configure)
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(canvas_window, width=e.width))
+        PAD = dict(pady=7, fill="x")
 
-        def _on_mousewheel(e):
-            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        left_hdr = tk.Frame(left_col, bg=CONTENT_BG)
+        left_hdr.pack(fill="x", pady=(0, 4))
+        tk.Label(left_hdr, text="PRIMARY WORKFLOW", font=("Courier New", 9, "bold"), fg=ACCENT, bg=CONTENT_BG).pack(anchor="w")
+        tk.Label(left_hdr, text="Core driving model path (Steps 01-04)", font=FONT_LABEL, fg=TEXT_MUTED, bg=CONTENT_BG).pack(anchor="w")
 
-        PAD = dict(padx=30, pady=8, fill="x")
-
-        shell1, body1 = self._make_card(pipeline, "STEP 01", "TASK + DATA SOURCE", ACCENT)
+        shell1, body1 = self._make_card(left_col, "STEP 01", "Task + Data Source", ACCENT)
         shell1.pack(**PAD)
         tk.Label(body1, text="DRIVING TASK", font=("Courier New", 8, "bold"), fg=ACCENT, bg=CARD_BG).pack(anchor="w", pady=(2, 4))
         self._task_combo = tb.Combobox(
@@ -615,7 +1704,9 @@ class AutoDriveApp(tb.Window):
         self._ingest_stats = tk.Label(body1, text="", font=("Courier New", 8), fg=ACCENT, bg=CARD_BG, anchor="w")
         self._ingest_stats.pack(anchor="w", pady=(0, 4))
 
-        shell2, body2 = self._make_card(pipeline, "STEP 02", "FEATURE PREP", "#a78bfa")
+        tk.Frame(left_col, bg=BORDER, height=1).pack(fill="x", padx=4)
+
+        shell2, body2 = self._make_card(left_col, "STEP 02", "Feature Prep", "#a78bfa")
         shell2.pack(**PAD)
         tk.Label(body2, text="Build traffic-sign features and validate schema for the selected task.", font=FONT_LABEL, fg=TEXT_MUTED, bg=CARD_BG).pack(anchor="w", pady=(4, 8))
         pre_row = tk.Frame(body2, bg=CARD_BG)
@@ -624,7 +1715,9 @@ class AutoDriveApp(tb.Window):
         self._preprocess_status = tk.Label(pre_row, text="  ○  Pending", font=("Courier New", 9), fg=TEXT_MUTED, bg=CARD_BG)
         self._preprocess_status.pack(side="left", padx=16)
 
-        shell3, body3 = self._make_card(pipeline, "STEP 03", "MODEL TRAINING", ACCENT3)
+        tk.Frame(left_col, bg=BORDER, height=1).pack(fill="x", padx=4)
+
+        shell3, body3 = self._make_card(left_col, "STEP 03", "Model Training", ACCENT3)
         shell3.pack(**PAD)
         train_left  = tk.Frame(body3, bg=CARD_BG)
         train_left.pack(side="left", fill="x", expand=True)
@@ -637,10 +1730,17 @@ class AutoDriveApp(tb.Window):
         self._train_progress.grid(row=2, column=0, sticky="w", pady=(4, 4))
         self._flat_btn(train_right, "🚀  TRAIN MODEL", ACCENT3, self._cmd_train).pack(ipadx=10, ipady=8)
 
-        shell4, body4 = self._make_card(pipeline, "STEP 04", "EVALUATION", ACCENT2)
+        tk.Frame(left_col, bg=BORDER, height=1).pack(fill="x", padx=4)
+
+        right_hdr = tk.Frame(right_col, bg=CONTENT_BG)
+        right_hdr.pack(fill="x", pady=(0, 4))
+        tk.Label(right_hdr, text="EVALUATION + EXPERIMENTS", font=("Courier New", 9, "bold"), fg=ACCENT2, bg=CONTENT_BG).pack(anchor="w")
+        tk.Label(right_hdr, text="Step 04 final checks and optional Step 05 CSV sandbox", font=FONT_LABEL, fg=TEXT_MUTED, bg=CONTENT_BG).pack(anchor="w")
+
+        shell4, body4 = self._make_card(right_col, "STEP 04", "Evaluation", ACCENT2)
         shell4.pack(**PAD)
         acc_frame = tk.Frame(body4, bg=CARD_BG)
-        acc_frame.pack(side="left", padx=(0, 40))
+        acc_frame.pack(side="left", padx=(0, 20))
         tk.Label(acc_frame, text="ACCURACY", font=("Courier New", 8, "bold"), fg=ACCENT2, bg=CARD_BG).pack(anchor="w")
         self._result_var = tk.StringVar(value="--%")
         tk.Label(acc_frame, textvariable=self._result_var, font=("Courier New", 30, "bold"), fg=ACCENT3, bg=CARD_BG).pack(anchor="w")
@@ -651,16 +1751,20 @@ class AutoDriveApp(tb.Window):
         self._flat_btn(report_frame, "📉  Confusion Matrix", ACCENT2, self._cmd_confusion_matrix).pack(fill="x", pady=5, ipadx=6, ipady=5)
         self._flat_btn(report_frame, "📄  Classification Report", "#5c6370", self._cmd_classification_report).pack(fill="x", pady=5, ipadx=6, ipady=5)
 
-        shell5, body5 = self._make_card(pipeline, "STEP 05", "CSV DATASET LAB", "#4f5d75")
+        tk.Frame(right_col, bg=BORDER, height=1).pack(fill="x", padx=4)
+
+        shell5, body5 = self._make_card(right_col, "STEP 05", "Optional CSV Experiment Lab", "#4f5d75")
         shell5.pack(**PAD)
         tk.Label(
             body5,
-            text="Use generic CSV training for experimentation. Driving workflow above remains the default path.",
+            text="Use this only when you want to test arbitrary CSV datasets. The driving workflow in Steps 01-04 remains your main production path.",
             font=FONT_LABEL,
             fg=TEXT_MUTED,
             bg=CARD_BG,
             justify="left",
         ).pack(anchor="w", pady=(2, 8))
+
+        tk.Frame(body5, bg=BORDER, height=1).pack(fill="x", pady=(2, 8))
 
         adv_top = tk.Frame(body5, bg=CARD_BG)
         adv_top.pack(fill="x", pady=(0, 6))
@@ -675,6 +1779,8 @@ class AutoDriveApp(tb.Window):
         )
         self._adv_dataset_label.pack(side="left")
         self._flat_btn(adv_top, "📂  Import CSV", "#4f5d75", self._cmd_adv_import_csv).pack(side="left", padx=10)
+
+        tk.Frame(body5, bg=BORDER, height=1).pack(fill="x", pady=(4, 8))
 
         adv_mid = tk.Frame(body5, bg=CARD_BG)
         adv_mid.pack(fill="x", pady=(4, 6))
@@ -699,6 +1805,8 @@ class AutoDriveApp(tb.Window):
             state="readonly",
         ).grid(row=1, column=1, sticky="w", padx=(20, 0), pady=(2, 0))
 
+        tk.Frame(body5, bg=BORDER, height=1).pack(fill="x", pady=(4, 8))
+
         adv_actions = tk.Frame(body5, bg=CARD_BG)
         adv_actions.pack(fill="x", pady=(6, 2))
         self._flat_btn(adv_actions, "⚙️  Preprocess", "#6c7a89", self._cmd_adv_preprocess).pack(side="left")
@@ -706,8 +1814,27 @@ class AutoDriveApp(tb.Window):
         self._flat_btn(adv_actions, "📉  CM", "#6c7a89", self._cmd_adv_confusion_matrix).pack(side="left", padx=8)
         self._flat_btn(adv_actions, "📄  Report", "#6c7a89", self._cmd_adv_classification_report).pack(side="left", padx=8)
 
-        self._adv_status_var = tk.StringVar(value="CSV dataset lab ready.")
+        self._adv_status_var = tk.StringVar(value="Optional CSV lab ready.")
         tk.Label(body5, textvariable=self._adv_status_var, font=("Courier New", 9), fg=TEXT_PRIMARY, bg=CARD_BG).pack(anchor="w", pady=(6, 0))
+
+        tk.Frame(right_col, bg=BORDER, height=1).pack(fill="x", padx=4)
+
+        helper = tk.Frame(right_col, bg=CARD_BG, highlightthickness=1, highlightbackground=BORDER)
+        helper.pack(fill="x", pady=7)
+        tk.Label(helper, text="Lab Notes", font=("Segoe UI Semibold", 11), fg=TEXT_PRIMARY, bg=CARD_BG).pack(anchor="w", padx=12, pady=(10, 4))
+        tk.Label(
+            helper,
+            text=(
+                "1) Start with Step 01 and lock the task.\n"
+                "2) Run prep before training.\n"
+                "3) Use Evaluation for final metrics and artifacts.\n"
+                "4) Use CSV Lab for side experiments only."
+            ),
+            font=FONT_LABEL,
+            fg=TEXT_MUTED,
+            bg=CARD_BG,
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=(0, 10))
 
         return view
 
@@ -725,13 +1852,43 @@ class AutoDriveApp(tb.Window):
         return shell, body
 
     def _flat_btn(self, parent, text, color, command):
-        btn = tk.Label(parent, text=text, font=("Courier New", 10, "bold"), fg="#0a0c10", bg=color, padx=14, pady=6, cursor="hand2")
-        def on_enter(e): btn.config(bg=TEXT_PRIMARY)
-        def on_leave(e): btn.config(bg=color)
-        def on_click(e): command()
+        btn = tk.Button(
+            parent,
+            text=text,
+            font=("Courier New", 10, "bold"),
+            fg="#091019",
+            bg=color,
+            activeforeground="#091019",
+            relief="flat",
+            bd=0,
+            padx=14,
+            pady=6,
+            cursor="hand2",
+            command=command,
+        )
+
+        def _hover_color(hex_color, factor=0.92):
+            hex_color = hex_color.strip()
+            if not hex_color.startswith("#") or len(hex_color) != 7:
+                return hex_color
+            r = max(0, min(255, int(int(hex_color[1:3], 16) * factor)))
+            g = max(0, min(255, int(int(hex_color[3:5], 16) * factor)))
+            b = max(0, min(255, int(int(hex_color[5:7], 16) * factor)))
+            return f"#{r:02x}{g:02x}{b:02x}"
+
+        hover = _hover_color(color)
+        pressed = _hover_color(color, 0.84)
+
+        btn.config(activebackground=pressed, highlightthickness=1, highlightbackground=hover)
+
+        def on_enter(e):
+            btn.config(bg=hover)
+
+        def on_leave(e):
+            btn.config(bg=color)
+
         btn.bind("<Enter>", on_enter)
         btn.bind("<Leave>", on_leave)
-        btn.bind("<Button-1>", on_click)
         return btn
 
     def _cmd_load_csv(self):
