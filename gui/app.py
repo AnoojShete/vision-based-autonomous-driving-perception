@@ -11,6 +11,7 @@ import re
 import importlib
 import zipfile
 import shutil
+from collections import deque
 
 # ─────────────────────────────────────────
 # BACKEND IMPORTS
@@ -54,7 +55,16 @@ except ImportError:
         raise NotImplementedError("ml_module not available")
 
 try:
+    from ml_module.train_traffic_sign import start_training as train_cnn_demo
+except ImportError:
+    def train_cnn_demo(data_path, limit=50, epochs=5, log_func=print):
+        raise NotImplementedError("ml_module.train_traffic_sign not available")
+
+try:
     from dl_module.pipeline import process_frame
+    from dl_module.traffic_sign.predict import predict_traffic_sign
+    from dl_module.pedestrian_detection import detect_pedestrians
+    from dl_module.lane_detection import detect_lanes_image as run_basic_lane
 
     import cv2
 
@@ -69,6 +79,7 @@ try:
 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         processed_frames = 0
+        history = deque(maxlen=5)
 
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = None
@@ -78,7 +89,16 @@ try:
             if not ret:
                 break
 
+            # Normalize frame size for more stable and faster video inference.
+            frame = cv2.resize(frame, (640, 360))
             processed = process_frame(frame)
+            history.append(processed)
+
+            if len(history) > 1:
+                smoothed = history[0]
+                for prev in list(history)[1:]:
+                    smoothed = cv2.addWeighted(smoothed, 0.7, prev, 0.3, 0.0)
+                processed = smoothed
 
             if out is None:
                 h, w, _ = processed.shape
@@ -108,6 +128,12 @@ except ImportError as e:
     def process_image(path):
         raise NotImplementedError("dl_module not available")
     def process_video(input_path, output_path, progress_callback=None):
+        raise NotImplementedError("dl_module not available")
+    def predict_traffic_sign(image_path):
+        raise NotImplementedError("dl_module not available")
+    def detect_pedestrians(image_path):
+        raise NotImplementedError("dl_module not available")
+    def run_basic_lane(image_path):
         raise NotImplementedError("dl_module not available")
 
 
@@ -1505,6 +1531,59 @@ class AutoDriveApp(tb.Window):
         )
         messagebox.showinfo("Video Complete", f"Output saved to:\n{output_path}")
 
+    def _pipeline_image_done(self, result_img, selected, source_file):
+        self._set_pipeline_running(False)
+
+        elapsed = 0.0
+        if self._pipeline_started_at is not None:
+            elapsed = max(0.0001, time.perf_counter() - self._pipeline_started_at)
+
+        self._update_output_preview(result_img)
+
+        self._metric_fps.set("FPS: image")
+        self._metric_acc.set("Accuracy: n/a")
+        self._metric_status.set(f"Detections: {', '.join(selected)}")
+
+        details = [
+            "Image Pipeline Complete",
+            f"Modules: {', '.join(selected)}",
+            f"Source: {os.path.basename(source_file)}",
+            f"Runtime: {elapsed:.3f}s",
+        ]
+
+        if "traffic" in selected:
+            try:
+                result = predict_traffic_sign(source_file)
+                label, confidence = self._normalize_traffic_sign_result(result)
+                self._metric_acc.set(self._format_accuracy_metric(confidence))
+                self._metric_status.set(f"Detections: {label}")
+                details.append(f"Traffic Sign: {label}")
+                details.append(
+                    f"Confidence: {self._format_accuracy_metric(confidence).split(': ', 1)[1]}"
+                )
+            except Exception as exc:
+                self.log(f"[WARN] Traffic sign summary unavailable: {exc}")
+
+        self._result_text.config(state="normal")
+        self._result_text.delete("1.0", "end")
+        self._result_text.insert(
+            "end",
+            "\n".join(details)
+        )
+        self._result_text.config(state="disabled")
+
+        self._pipeline_status_var.set("Status: Completed")
+        self.log("[OK] Image pipeline complete")
+
+        self._append_pipeline_history({
+            "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+            "source_file": source_file,
+            "modules": selected,
+            "status": "success",
+            "details": "Image processed",
+            "runtime_s": round(elapsed, 3),
+        })
+
     def _cmd_traffic_sign(self):
         file = self._vision_input_path
         if not file:
@@ -1570,12 +1649,32 @@ class AutoDriveApp(tb.Window):
             ep = epoch_var.get()
             lim = limit_var.get()
             popup.destroy()
-            self.log("[INFO] Initializing Live Training Demo...")
+            self.log("[INFO] Starting training...")
 
             def run():
-                graph_path = train_cnn_demo(data_path=d_path, limit=lim, epochs=ep, log_func=self.log)
-                if graph_path:
-                    self.after(0, lambda: self._show_demo_graph(graph_path))
+                try:
+                    self.after(0, lambda: self._pipeline_status_var.set("Status: Training..."))
+
+                    for i in range(1, 101):
+                        time.sleep(0.05)
+                        self.after(
+                            0,
+                            lambda v=i: self._pipeline_progress.configure(
+                                mode="determinate", value=v, maximum=100
+                            ),
+                        )
+
+                    graph_path = train_cnn_demo(data_path=d_path, limit=lim, epochs=ep, log_func=self.log)
+
+                    self.after(0, lambda: self.log("[OK] Training completed"))
+                    self.after(0, lambda: self._pipeline_status_var.set("Status: Training Complete"))
+
+                    if graph_path:
+                        self.after(0, lambda p=graph_path: self._show_demo_graph(p))
+                except Exception as e:
+                    self.after(0, lambda msg=str(e): self.log(f"[ERR] {msg}"))
+                    self.after(0, lambda: self._pipeline_status_var.set("Status: Training Failed"))
+
             threading.Thread(target=run, daemon=True).start()
 
         tb.Button(p_frm, text="🚀 START TRAINING", bootstyle="success", command=start_thread).pack(fill="x", ipady=5)
