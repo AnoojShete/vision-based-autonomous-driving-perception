@@ -5,7 +5,7 @@ from utils.common import initialize_weights
 from model.seg_model import SegHead
 
 class parsingNet(torch.nn.Module):
-    def __init__(self, pretrained=True, backbone='50', num_grid_row = None, num_cls_row = None, num_grid_col = None, num_cls_col = None, 
+    def __init__(self, pretrained=True, backbone='50', num_grid_row = None, num_cls_row = None, num_grid_col = None, num_cls_col = None,
                 num_lane_on_row = None, num_lane_on_col = None, use_aux=False, input_height = None, input_width = None):
         super(parsingNet, self).__init__()
         self.num_grid_row = num_grid_row
@@ -19,7 +19,6 @@ class parsingNet(torch.nn.Module):
         self.input_height = input_height
         self.input_width = input_width
 
-
         self.dim1 = self.num_grid_row * self.num_cls_row
         self.dim2 = 2 * self.num_cls_row
         self.dim3 = self.num_grid_col * self.num_cls_col
@@ -27,7 +26,7 @@ class parsingNet(torch.nn.Module):
         self.total_dim_row = self.dim1 + self.dim2
         self.total_dim_col = self.dim3 + self.dim4
         mlp_mid_dim = 2048
-        
+
         self.input_dim = (self.input_height//32) * (self.input_width//32) * 9
 
         self.model = resnet(backbone, pretrained=pretrained)
@@ -65,14 +64,14 @@ class parsingNet(torch.nn.Module):
         out_row = self.cls_row(out[:, :10, :]).permute(0, 2, 1)
         out_col = self.cls_col(out[:, 10:, :]).permute(0, 2, 1)
 
-        pred_dict = {'loc_row': out_row[:,:self.dim1, :].view(-1,self.num_grid_row, self.num_cls_row, self.num_lane_on_row), 
+        pred_dict = {'loc_row': out_row[:,:self.dim1, :].view(-1,self.num_grid_row, self.num_cls_row, self.num_lane_on_row),
                 'loc_col': out_col[:,:self.dim3, :].view(-1, self.num_grid_col, self.num_cls_col, self.num_lane_on_col),
-                'exist_row': out_row[:,self.dim1:self.dim1+self.dim2, :].view(-1, 2, self.num_cls_row, self.num_lane_on_row), 
+                'exist_row': out_row[:,self.dim1:self.dim1+self.dim2, :].view(-1, 2, self.num_cls_row, self.num_lane_on_row),
                 'exist_col': out_col[:,self.dim3:self.dim3+self.dim4, :].view(-1, 2, self.num_cls_col, self.num_lane_on_col),
                 'lane_token_row': lane_token[:, :10, :, :].sum(1), 'lane_token_col': lane_token[:, 10:, :, :].sum(1)}
         if self.use_aux:
             pred_dict['seg_out'] = seg_out
-        
+
         return pred_dict
 
     def forward_tta(self, x):

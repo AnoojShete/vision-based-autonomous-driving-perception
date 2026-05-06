@@ -8,7 +8,7 @@ class vgg16bn(torch.nn.Module):
         model = list(torchvision.models.vgg16_bn(pretrained=pretrained).features.children())
         model = model[:33]+model[34:43]
         self.model = torch.nn.Sequential(*model)
-        
+
     def forward(self,x):
         return self.model(x)
 class resnet(torch.nn.Module):
@@ -36,7 +36,7 @@ class resnet(torch.nn.Module):
             model = torch.hub.load('cfzd/FcaNet', 'fca34' ,pretrained=True)
         else:
             raise NotImplementedError
-        
+
         self.conv1 = model.conv1
         self.bn1 = model.bn1
         self.relu = model.relu

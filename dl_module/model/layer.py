@@ -1,35 +1,7 @@
 import torch
 from torch import nn
 
-
 class AddCoordinates(object):
-
-    r"""Coordinate Adder Module as defined in 'An Intriguing Failing of
-    Convolutional Neural Networks and the CoordConv Solution'
-    (https://arxiv.org/pdf/1807.03247.pdf).
-    This module concatenates coordinate information (`x`, `y`, and `r`) with
-    given input tensor.
-    `x` and `y` coordinates are scaled to `[-1, 1]` range where origin is the
-    center. `r` is the Euclidean distance from the center and is scaled to
-    `[0, 1]`.
-    Args:
-        with_r (bool, optional): If `True`, adds radius (`r`) coordinate
-            information to input image. Default: `False`
-    Shape:
-        - Input: `(N, C_{in}, H_{in}, W_{in})`
-        - Output: `(N, (C_{in} + 2) or (C_{in} + 3), H_{in}, W_{in})`
-    Examples:
-        >>> coord_adder = AddCoordinates(True)
-        >>> input = torch.randn(8, 3, 64, 64)
-        >>> output = coord_adder(input)
-        >>> coord_adder = AddCoordinates(True)
-        >>> input = torch.randn(8, 3, 64, 64).cuda()
-        >>> output = coord_adder(input)
-        >>> device = torch.device("cuda:0")
-        >>> coord_adder = AddCoordinates(True)
-        >>> input = torch.randn(8, 3, 64, 64).to(device)
-        >>> output = coord_adder(input)
-    """
 
     def __init__(self, with_r=False):
         self.with_r = with_r
@@ -56,31 +28,7 @@ class AddCoordinates(object):
 
         return image
 
-
 class CoordConv(nn.Module):
-
-    r"""2D Convolution Module Using Extra Coordinate Information as defined
-    in 'An Intriguing Failing of Convolutional Neural Networks and the
-    CoordConv Solution' (https://arxiv.org/pdf/1807.03247.pdf).
-    Args:
-        Same as `torch.nn.Conv2d` with two additional arguments
-        with_r (bool, optional): If `True`, adds radius (`r`) coordinate
-            information to input image. Default: `False`
-    Shape:
-        - Input: `(N, C_{in}, H_{in}, W_{in})`
-        - Output: `(N, C_{out}, H_{out}, W_{out})`
-    Examples:
-        >>> coord_conv = CoordConv(3, 16, 3, with_r=True)
-        >>> input = torch.randn(8, 3, 64, 64)
-        >>> output = coord_conv(input)
-        >>> coord_conv = CoordConv(3, 16, 3, with_r=True).cuda()
-        >>> input = torch.randn(8, 3, 64, 64).cuda()
-        >>> output = coord_conv(input)
-        >>> device = torch.device("cuda:0")
-        >>> coord_conv = CoordConv(3, 16, 3, with_r=True).to(device)
-        >>> input = torch.randn(8, 3, 64, 64).to(device)
-        >>> output = coord_conv(input)
-    """
 
     def __init__(self, in_channels, out_channels, kernel_size,
                  stride=1, padding=0, dilation=1, groups=1, bias=True,

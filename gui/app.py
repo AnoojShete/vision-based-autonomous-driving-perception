@@ -15,9 +15,6 @@ from collections import deque
 import queue
 import threading
 
-# ─────────────────────────────────────────
-# BACKEND IMPORTS
-# ─────────────────────────────────────────
 try:
     import pandas as pd
     PANDAS_OK = True
@@ -64,80 +61,46 @@ except ImportError:
 
 try:
     from dl_module.pipeline import process_frame, reset_pipeline_state
-    from dl_module.traffic_sign.predict import predict_traffic_sign
+    from dl_module.traffic_sign.predict import predict_traffic_sign, reload_traffic_model
     from dl_module.pedestrian_detection import detect_pedestrians
     from dl_module.lane_detection import detect_lanes_image as run_basic_lane
 
     import cv2
 
-    def process_image(path):
+    def process_image(path, **module_flags):
         img = cv2.imread(path)
         if img is None:
             raise ValueError("Invalid image")
-        return process_frame(img)
+        return process_frame(img, **module_flags)
 
-    def process_video(input_path, output_path, progress_callback=None):
-        """
-        Process a video file through the full perception pipeline and write
-        annotated output to `output_path` at the source's native resolution.
-    
-        Resolution policy
-        -----------------
-        Frames are enqueued at their native capture resolution (e.g. 1920×1080).
-        No pre-processing resize is applied in the reader thread.  This ensures:
-        • YOLO receives a full-resolution image so distant signs are detectable.
-        • The bounding-box crop passed to Keras is sharp, not a blurry blob.
-        • The output video matches the source resolution exactly.
-    
-        If your source is already 640×360 the behaviour is identical to before.
-        If your source is 1920×1080 expect roughly 4–7 FPS (CPU-only) instead of
-        14–18 FPS.  GPU inference via CUDA/MPS closes most of this gap.
-    
-        Parameters
-        ----------
-        input_path        Path to the source video (mp4 / avi / mov).
-        output_path       Destination path for the annotated video.
-        progress_callback Optional callable(done_frames, total_frames).
-    
-        Returns
-        -------
-        output_path (str)
-        """
-        # ── Config ────────────────────────────────────────────────────────────────
-        # Process 1 in every N raw frames; duplicate the result N times in the
-        # output so playback speed and duration are unchanged.
+    def process_video(input_path, output_path, progress_callback=None, **module_flags):
+
         PROCESS_EVERY:    int = 2
-        READ_QUEUE_DEPTH: int = 4   # reduced from 8: 1080p frames are ~6 MB each
-    
-        # ── Reset sign-detection temporal cache for this video ────────────────────
+        READ_QUEUE_DEPTH: int = 4
+
         try:
             from dl_module.pipeline import reset_pipeline_state
             reset_pipeline_state()
         except ImportError:
             pass
-    
-        # ── Open the video source ─────────────────────────────────────────────────
+
         cap = cv2.VideoCapture(input_path)
         if not cap.isOpened():
             raise IOError(f"Cannot open video: {input_path}")
-    
+
         total_raw_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
         src_fps          = cap.get(cv2.CAP_PROP_FPS) or 30.0
         src_w            = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         src_h            = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    
-        print(f"[process_video] Source: {src_w}×{src_h} @ {src_fps:.1f} fps  "
+
+        print(f"[process_video] Source: {src_w}{src_h} @ {src_fps:.1f} fps  "
             f"({total_raw_frames} frames)")
         print(f"[process_video] Processing every {PROCESS_EVERY} frame(s) "
-            f"— no pre-scale applied.")
-    
-        # ── Background reader thread ──────────────────────────────────────────────
-        # The reader thread's only job is I/O: pull raw frames off disk and place
-        # them in the bounded queue.  NO resize is applied here.  The raw frame
-        # at native resolution is what YOLO and Keras will receive.
+            f" no pre-scale applied.")
+
         _SENTINEL = object()
         read_q: "queue.Queue" = queue.Queue(maxsize=READ_QUEUE_DEPTH)
-    
+
         def _reader() -> None:
             raw_idx = 0
             while True:
@@ -145,59 +108,47 @@ try:
                 if not ret:
                     break
                 if raw_idx % PROCESS_EVERY == 0:
-                    # ── KEY CHANGE ────────────────────────────────────────────────
-                    # Previously:  resized = cv2.resize(raw, (TARGET_W, TARGET_H))
-                    #              read_q.put((raw_idx, resized))
-                    #
-                    # Now: enqueue the raw frame at native resolution.
-                    # YOLO crops from this full-res image → Keras gets a sharp patch.
+
                     read_q.put((raw_idx, raw))
                 raw_idx += 1
             read_q.put(_SENTINEL)
-    
+
         reader_thread = threading.Thread(target=_reader, daemon=True)
         reader_thread.start()
-    
-        # ── Main processing loop ──────────────────────────────────────────────────
+
         out: "cv2.VideoWriter | None" = None
-    
+
         while True:
             item = read_q.get()
             if item is _SENTINEL:
                 break
-    
+
             raw_idx, frame = item
-    
+
             try:
-                processed = process_frame(frame)
+                processed = process_frame(frame, **module_flags)
             except Exception as exc:
                 print(f"[pipeline] Frame {raw_idx} error: {exc}")
-                processed = frame   # fall back to raw on error
-    
-            # Lazy-init writer: resolution is read from the first processed frame
-            # so it automatically matches whatever the pipeline outputs (which is
-            # always the same shape as the input since no module resizes the frame).
+                processed = frame
+
             if out is None:
                 h, w = processed.shape[:2]
-                print(f"[process_video] Output: {w}×{h} @ {src_fps:.1f} fps")
+                print(f"[process_video] Output: {w}{h} @ {src_fps:.1f} fps")
                 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
                 out = cv2.VideoWriter(output_path, fourcc, src_fps, (w, h))
-    
-            # Write the processed frame once per skipped raw frame so the output
-            # has the same total frame count and plays back at the correct speed.
+
             for _ in range(PROCESS_EVERY):
                 out.write(processed)
-    
+
             if progress_callback:
                 done = min(raw_idx + PROCESS_EVERY, total_raw_frames)
                 progress_callback(done, total_raw_frames)
-    
-        # ── Cleanup ───────────────────────────────────────────────────────────────
+
         reader_thread.join(timeout=5)
         cap.release()
         if out:
             out.release()
-    
+
         return output_path
 
     DL_OK = True
@@ -217,10 +168,6 @@ except ImportError as e:
     def run_basic_lane(image_path):
         raise NotImplementedError("dl_module not available")
 
-
-# ─────────────────────────────────────────
-# COLOUR & STYLE CONSTANTS
-# ─────────────────────────────────────────
 SIDEBAR_BG   = "#0b1120"
 SIDEBAR_W    = 300
 ACCENT       = "#22d3ee"
@@ -244,12 +191,11 @@ FONT_LOG     = ("Consolas", 9)
 FONT_HEADING = ("Segoe UI Semibold", 22)
 FONT_SUB     = ("Segoe UI", 11)
 
-
 class AutoDriveApp(tb.Window):
 
     def __init__(self):
         super().__init__(themename="cyborg")
-        self.title("AutoDrive AI — Perception Toolkit")
+        self.title("AutoDrive AI  Perception Toolkit")
         self.geometry("1400x850")
         self.minsize(960, 640)
         self.configure(bg=SIDEBAR_BG)
@@ -286,13 +232,10 @@ class AutoDriveApp(tb.Window):
         self.show_view("dashboard")
         self.log("[INFO] AutoDrive AI started.")
         if not DL_OK:
-            self.log("[WARN] dl_module not found — using placeholders.")
+            self.log("[WARN] dl_module not found  using placeholders.")
         if not ML_OK:
-            self.log("[WARN] ml_module not found — using placeholders.")
+            self.log("[WARN] ml_module not found  using placeholders.")
 
-    # ─────────────────────────────────────────
-    # SIDEBAR
-    # ─────────────────────────────────────────
     def _build_sidebar(self):
         sb = tk.Frame(self, bg=SIDEBAR_BG, width=SIDEBAR_W)
         sb.pack(side="left", fill="y")
@@ -301,7 +244,7 @@ class AutoDriveApp(tb.Window):
         logo_frame = tk.Frame(sb, bg=SIDEBAR_BG)
         logo_frame.pack(fill="x", padx=16, pady=(28, 8))
 
-        tk.Label(logo_frame, text="⬡", font=("Courier New", 28, "bold"),
+        tk.Label(logo_frame, text="", font=("Courier New", 28, "bold"),
                  fg=ACCENT, bg=SIDEBAR_BG).pack(side="left")
         tk.Label(logo_frame, text=" AutoDrive\n AI",
                  font=FONT_TITLE, fg=TEXT_PRIMARY, bg=SIDEBAR_BG,
@@ -313,9 +256,9 @@ class AutoDriveApp(tb.Window):
                  fg=TEXT_MUTED, bg=SIDEBAR_BG).pack(anchor="w", padx=20, pady=(4, 8))
 
         nav_items = [
-            ("dashboard",  "🏠  Dashboard"),
-            ("vision",     "👁️  Vision Studio"),
-            ("datalab",    "📊  Data Lab"),
+            ("dashboard",  "  Dashboard"),
+            ("vision",     "  Vision Studio"),
+            ("datalab",    "  Data Lab"),
         ]
         self._nav_buttons = {}
         for key, label in nav_items:
@@ -325,7 +268,7 @@ class AutoDriveApp(tb.Window):
         tk.Frame(sb, bg=SIDEBAR_BG).pack(expand=True, fill="both")
 
         tk.Frame(sb, bg="#1e2230", height=1).pack(fill="x", padx=16, pady=6)
-        self._status_dot = tk.Label(sb, text="● System Ready",
+        self._status_dot = tk.Label(sb, text=" System Ready",
                                     font=("Courier New", 9), fg="#00ff88",
                                     bg=SIDEBAR_BG)
         self._status_dot.pack(anchor="w", padx=18, pady=(0, 20))
@@ -378,14 +321,10 @@ class AutoDriveApp(tb.Window):
                 frame._btn.config(bg=SIDEBAR_BG, fg=TEXT_MUTED)
                 frame._indicator.config(bg=SIDEBAR_BG)
 
-    # ─────────────────────────────────────────
-    # MAIN AREA
-    # ─────────────────────────────────────────
     def _build_main_area(self):
         right = tk.Frame(self, bg=CONTENT_BG)
         right.pack(side="left", fill="both", expand=True)
 
-        # Vertical split lets users resize content area vs. log area by dragging the sash.
         splitter = tk.PanedWindow(
             right,
             orient="vertical",
@@ -410,14 +349,13 @@ class AutoDriveApp(tb.Window):
         self._main_right = right
         self._splitter_after_id = None
 
-        # Set an initial split that keeps the log visible without dominating the workspace.
         self.after(0, self._clamp_splitter_sash)
         splitter.bind("<ButtonRelease-1>", lambda _e: self._clamp_splitter_sash())
         right.bind("<Configure>", lambda _e: self._schedule_splitter_clamp())
 
         hdr = tk.Frame(console_frame, bg=LOG_BG)
         hdr.pack(fill="x", padx=12, pady=(6, 0))
-        tk.Label(hdr, text="▸ SYSTEM LOG", font=("Consolas", 8, "bold"),
+        tk.Label(hdr, text=" SYSTEM LOG", font=("Consolas", 8, "bold"),
                  fg=ACCENT, bg=LOG_BG).pack(side="left")
         tk.Button(hdr, text="CLEAR", font=("Consolas", 7),
                   fg=TEXT_MUTED, bg=LOG_BG, bd=0, activebackground=LOG_BG,
@@ -468,7 +406,6 @@ class AutoDriveApp(tb.Window):
             min_log_h = 110
             max_log_h = min(280, int(total_h * 0.38))
 
-            # For compact windows, keep a sane content area while preserving log access.
             if total_h - min_content_h < min_log_h:
                 min_content_h = max(260, total_h - min_log_h)
 
@@ -679,10 +616,10 @@ class AutoDriveApp(tb.Window):
         self._system_health = self._compute_system_health()
         missing = self._system_health.get("critical_missing", [])
         if not missing:
-            text = "● System Ready"
+            text = " System Ready"
             color = "#00e5a0"
         else:
-            text = f"● System Check ({len(missing)} issue{'s' if len(missing) != 1 else ''})"
+            text = f" System Check ({len(missing)} issue{'s' if len(missing) != 1 else ''})"
             color = ACCENT3 if len(missing) <= 2 else ACCENT2
             if force_log:
                 self.log(f"[WARN] Critical checks failing: {', '.join(missing)}")
@@ -715,9 +652,6 @@ class AutoDriveApp(tb.Window):
         self._log_text.delete("1.0", "end")
         self._log_text.config(state="disabled")
 
-    # ─────────────────────────────────────────
-    # ── VIEW: DASHBOARD ──────────────────────
-    # ─────────────────────────────────────────
     def _build_dashboard_view(self, parent):
         view = tk.Frame(parent, bg=CONTENT_BG)
 
@@ -895,9 +829,9 @@ class AutoDriveApp(tb.Window):
             }
             for key, label in self._dashboard_check_rows.items():
                 state = checklist_states.get(key, False)
-                dot = "●" if state else "○"
+                dot = "" if state else ""
                 color = "#00e5a0" if state else ACCENT3
-                title = label.cget("text").split(" ", 1)[1] if " " in label.cget("text") and label.cget("text").startswith(("●", "○")) else label.cget("text")
+                title = label.cget("text").split(" ", 1)[1] if " " in label.cget("text") and label.cget("text").startswith(("", "")) else label.cget("text")
                 label.config(text=f"{dot} {title}", fg=color)
 
     def _status_card(self, parent, title, sub, color, ok):
@@ -910,16 +844,13 @@ class AutoDriveApp(tb.Window):
         tk.Label(card, text=sub, font=("Courier New", 8),
                  fg=TEXT_MUTED, bg=CARD_BG).pack(anchor="w", padx=14)
 
-        status_text  = "● READY" if ok else "● UNAVAILABLE"
+        status_text  = " READY" if ok else " UNAVAILABLE"
         status_color = "#00ff88" if ok else ACCENT2
         tk.Label(card, text=status_text, font=("Courier New", 8),
                  fg=status_color, bg=CARD_BG).pack(anchor="w", padx=14, pady=(6, 0))
 
         tk.Frame(card, bg=color, height=3).pack(side="bottom", fill="x")
 
-    # ─────────────────────────────────────────
-    # ── VIEW: VISION STUDIO ──────────────────
-    # ─────────────────────────────────────────
     def _build_vision_view(self, parent):
         view = tk.Frame(parent, bg=CONTENT_BG)
 
@@ -983,7 +914,7 @@ class AutoDriveApp(tb.Window):
         cta_zone.pack(fill="x", padx=18, pady=(0, 14))
         self._run_btn = tk.Button(
             cta_zone,
-            text="🚀 Run Full Pipeline",
+            text=" Run Full Pipeline",
             font=("Segoe UI Semibold", 13),
             fg="#031722",
             bg=ACCENT,
@@ -1016,11 +947,13 @@ class AutoDriveApp(tb.Window):
         self._module_traffic = tk.BooleanVar(value=True)
         self._module_pedestrian = tk.BooleanVar(value=True)
         self._module_lane = tk.BooleanVar(value=True)
+        self._module_light = tk.BooleanVar(value=True)
 
         for label, var, color in [
             ("Traffic Sign Detection", self._module_traffic, ACCENT2),
             ("Pedestrian Detection", self._module_pedestrian, ACCENT3),
             ("Lane Detection", self._module_lane, ACCENT4),
+            ("Traffic Light Detection", self._module_light, "#00e5a0"),
         ]:
             row = tk.Frame(left_panel, bg=CARD_BG_ALT, highlightthickness=1, highlightbackground=BORDER)
             row.pack(fill="x", padx=14, pady=5)
@@ -1082,9 +1015,6 @@ class AutoDriveApp(tb.Window):
 
         return view
 
-    # ─────────────────────────────────────────
-    # ── COMMANDS: VISION & TRAINING ──────────
-    # ─────────────────────────────────────────
     def _setup_drop_target(self):
         if not DND_OK:
             self._drag_drop_ready = False
@@ -1537,7 +1467,18 @@ class AutoDriveApp(tb.Window):
             selected.append("pedestrian")
         if self._module_lane.get():
             selected.append("lane")
+        if self._module_light.get():
+            selected.append("light")
         return selected
+
+    def _module_flags(self):
+
+        return {
+            "run_lanes":  self._module_lane.get(),
+            "run_peds":   self._module_pedestrian.get(),
+            "run_signs":  self._module_traffic.get(),
+            "run_lights": self._module_light.get(),
+        }
 
     def _set_pipeline_running(self, running):
         self._pipeline_running = running
@@ -1548,7 +1489,7 @@ class AutoDriveApp(tb.Window):
             self._pipeline_progress.start(12)
             self._pipeline_status_var.set("Status: Running pipeline")
         else:
-            self._run_btn.config(text="🚀 Run Full Pipeline", state="normal", bg=ACCENT)
+            self._run_btn.config(text=" Run Full Pipeline", state="normal", bg=ACCENT)
             self._pipeline_progress.stop()
             self._pipeline_progress.configure(mode="indeterminate", maximum=100, value=0)
 
@@ -1627,9 +1568,10 @@ class AutoDriveApp(tb.Window):
 
         details = [
             "Image Pipeline Complete",
-            f"Modules: {', '.join(selected)}",
+            f"Active Modules: {', '.join(selected)}",
             f"Source: {os.path.basename(source_file)}",
             f"Runtime: {elapsed:.3f}s",
+            "",
         ]
 
         if "traffic" in selected:
@@ -1644,6 +1586,13 @@ class AutoDriveApp(tb.Window):
                 )
             except Exception as exc:
                 self.log(f"[WARN] Traffic sign summary unavailable: {exc}")
+
+        if "pedestrian" in selected:
+            details.append("Pedestrian/Vehicle Detection: active")
+        if "lane" in selected:
+            details.append("Lane Detection: active")
+        if "light" in selected:
+            details.append("Traffic Light Detection: active")
 
         self._result_text.config(state="normal")
         self._result_text.delete("1.0", "end")
@@ -1709,14 +1658,14 @@ class AutoDriveApp(tb.Window):
         tk.Label(p_frm, text="Dataset Path (contains class folders):", font=FONT_LABEL, fg=TEXT_PRIMARY, bg=CARD_BG).pack(anchor="w")
         row1 = tk.Frame(p_frm, bg=CARD_BG)
         row1.pack(fill="x", pady=(2, 10))
-        
+
         path_entry = tb.Entry(row1, textvariable=path_var, bootstyle="secondary")
         path_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
-        
+
         def browse():
             d = filedialog.askdirectory()
             if d: path_var.set(d)
-        
+
         tb.Button(row1, text="Browse", bootstyle="outline-secondary", command=browse).pack(side="right")
 
         tk.Label(p_frm, text="Epochs (Recommended: 5-15):", font=FONT_LABEL, fg=TEXT_PRIMARY, bg=CARD_BG).pack(anchor="w")
@@ -1750,6 +1699,14 @@ class AutoDriveApp(tb.Window):
                     self.after(0, lambda: self.log("[OK] Training completed"))
                     self.after(0, lambda: self._pipeline_status_var.set("Status: Training Complete"))
 
+                    try:
+                        if reload_traffic_model():
+                            self.after(0, lambda: self.log("[OK] Traffic sign model reloaded with new weights."))
+                        else:
+                            self.after(0, lambda: self.log("[WARN] Weight file not found after training."))
+                    except Exception:
+                        pass
+
                     if graph_path:
                         self.after(0, lambda p=graph_path: self._show_demo_graph(p))
                 except Exception as e:
@@ -1758,7 +1715,7 @@ class AutoDriveApp(tb.Window):
 
             threading.Thread(target=run, daemon=True).start()
 
-        tb.Button(p_frm, text="🚀 START TRAINING", bootstyle="success", command=start_thread).pack(fill="x", ipady=5)
+        tb.Button(p_frm, text=" START TRAINING", bootstyle="success", command=start_thread).pack(fill="x", ipady=5)
 
     def _show_demo_graph(self, path):
         messagebox.showinfo("Training Complete", "Demo Training Finished!\nShowing results graph.")
@@ -1784,13 +1741,13 @@ class AutoDriveApp(tb.Window):
         if not found_path:
             messagebox.showerror("Error", "Graph not found.\nRun 'train_traffic_sign.py' first.")
             return
-        
+
         self.log(f"[INFO] Opening training graph: {found_path}")
         popup = tk.Toplevel(self)
         popup.title("Deep Learning Training History")
         popup.geometry("1000x500")
         popup.configure(bg=CARD_BG)
-        
+
         if PIL_OK:
             img = Image.open(found_path)
             img = img.resize((980, 480), Image.Resampling.LANCZOS)
@@ -1835,17 +1792,16 @@ class AutoDriveApp(tb.Window):
             return
         self.log("[INFO] Lane Detection (Basic) started")
         self.log(f"[INFO] Processing: {file}")
-        
+
         try:
-            # Run the basic lane detection
+
             result = run_basic_lane(file)
-            
-            # 🔧 FIX: Handle case where function returns (image, lines) tuple
+
             if isinstance(result, tuple) or isinstance(result, list):
-                final_img = result[0] # Take the first item (the image)
+                final_img = result[0]
             else:
-                final_img = result    # It was just an image
-            
+                final_img = result
+
             self.log("[OK]   Lane detection complete.")
             self._update_output_preview(final_img)
             self._metric_acc.set("Accuracy: lane model")
@@ -1854,7 +1810,7 @@ class AutoDriveApp(tb.Window):
             self._result_text.delete("1.0", "end")
             self._result_text.insert("end", "Lane Detection\nLane overlays generated successfully.")
             self._result_text.config(state="disabled")
-                
+
         except Exception as e:
             self.log(f"[ERR]  {e}")
             messagebox.showerror("Error", f"Lane Detection Failed:\n{str(e)}")
@@ -1869,6 +1825,7 @@ class AutoDriveApp(tb.Window):
             return
 
         selected = self._selected_modules()
+        flags = self._module_flags()
         self.log(f"[INFO] Running pipeline on: {input_path}")
         self.log(f"[INFO] Modules: {', '.join(selected)}")
 
@@ -1879,16 +1836,15 @@ class AutoDriveApp(tb.Window):
                 if self._is_video_file(input_path):
                     output_path = self._build_video_output_path(input_path)
 
-                    # 🔥 IMPORTANT
                     self.after(0, self._prepare_video_progress_ui)
 
                     result = process_video(
                         input_path,
                         output_path,
-                        progress_callback=self._update_video_progress
+                        progress_callback=self._update_video_progress,
+                        **flags
                     )
 
-                    # ✅ VIDEO SUCCESS
                     if isinstance(result, str) and os.path.exists(result):
                         self.after(0, self._pipeline_video_done,
                                 "Video Processed", result, selected, input_path)
@@ -1896,9 +1852,8 @@ class AutoDriveApp(tb.Window):
                         raise ValueError("Invalid video output")
 
                 else:
-                    result = process_image(input_path)
+                    result = process_image(input_path, **flags)
 
-                    # ✅ IMAGE SUCCESS
                     if hasattr(result, "shape"):
                         self.after(0, self._pipeline_image_done,
                                 result, selected, input_path)
@@ -1910,7 +1865,6 @@ class AutoDriveApp(tb.Window):
 
         threading.Thread(target=run, daemon=True).start()
 
-
     def _pipeline_done(self, result_img, status, selected, confidence, source_file):
         self._set_pipeline_running(False)
         elapsed = 0.0
@@ -1920,7 +1874,7 @@ class AutoDriveApp(tb.Window):
         confidence_text = self._format_accuracy_metric(confidence)
         detections = self._extract_detection_count(status)
 
-        self.log(f"[OK]   Pipeline complete — {status}")
+        self.log(f"[OK]   Pipeline complete  {status}")
         self._pipeline_status_var.set("Status: Completed")
         self._metric_fps.set(f"FPS: {fps:.1f}")
         self._metric_acc.set(confidence_text)
@@ -1990,9 +1944,6 @@ class AutoDriveApp(tb.Window):
             "details": error_msg,
         })
 
-    # ─────────────────────────────────────────
-    # DATA LAB COMMANDS
-    # ─────────────────────────────────────────
     def _build_datalab_view(self, parent):
         view = tk.Frame(parent, bg=CONTENT_BG)
         tk.Label(view, text="Data Lab", font=FONT_HEADING, fg=TEXT_PRIMARY, bg=CONTENT_BG).pack(anchor="w", padx=30, pady=(24, 2))
@@ -2031,7 +1982,7 @@ class AutoDriveApp(tb.Window):
         file_row.pack(fill="x", pady=(4, 6))
         self._dataset_label = tk.Label(file_row, text="No driving dataset loaded.", font=FONT_LABEL, fg=TEXT_MUTED, bg=CARD_BG, width=42, anchor="w")
         self._dataset_label.pack(side="left")
-        self._flat_btn(file_row, "📂  Load Driving Data", ACCENT, self._cmd_load_csv).pack(side="left", padx=10)
+        self._flat_btn(file_row, "  Load Driving Data", ACCENT, self._cmd_load_csv).pack(side="left", padx=10)
         self._ingest_stats = tk.Label(body1, text="", font=("Courier New", 8), fg=ACCENT, bg=CARD_BG, anchor="w")
         self._ingest_stats.pack(anchor="w", pady=(0, 4))
 
@@ -2042,8 +1993,8 @@ class AutoDriveApp(tb.Window):
         tk.Label(body2, text="Build traffic-sign features and validate schema for the selected task.", font=FONT_LABEL, fg=TEXT_MUTED, bg=CARD_BG).pack(anchor="w", pady=(4, 8))
         pre_row = tk.Frame(body2, bg=CARD_BG)
         pre_row.pack(fill="x")
-        self._flat_btn(pre_row, "⚙️  Prepare Features", "#a78bfa", self._cmd_preprocess).pack(side="left")
-        self._preprocess_status = tk.Label(pre_row, text="  ○  Pending", font=("Courier New", 9), fg=TEXT_MUTED, bg=CARD_BG)
+        self._flat_btn(pre_row, "  Prepare Features", "#a78bfa", self._cmd_preprocess).pack(side="left")
+        self._preprocess_status = tk.Label(pre_row, text="    Pending", font=("Courier New", 9), fg=TEXT_MUTED, bg=CARD_BG)
         self._preprocess_status.pack(side="left", padx=16)
 
         tk.Frame(left_col, bg=BORDER, height=1).pack(fill="x", padx=4)
@@ -2059,7 +2010,7 @@ class AutoDriveApp(tb.Window):
         tb.Combobox(train_left, textvariable=self._algo_var, values=["Decision Tree", "Naive Bayes", "SVM", "Random Forest"], width=28, bootstyle="warning", state="readonly").grid(row=1, column=0, sticky="w", pady=(0, 8))
         self._train_progress = tb.Progressbar(train_left, bootstyle="warning-striped", mode="indeterminate", length=220)
         self._train_progress.grid(row=2, column=0, sticky="w", pady=(4, 4))
-        self._flat_btn(train_right, "🚀  TRAIN MODEL", ACCENT3, self._cmd_train).pack(ipadx=10, ipady=8)
+        self._flat_btn(train_right, "  TRAIN MODEL", ACCENT3, self._cmd_train).pack(ipadx=10, ipady=8)
 
         tk.Frame(left_col, bg=BORDER, height=1).pack(fill="x", padx=4)
 
@@ -2079,8 +2030,8 @@ class AutoDriveApp(tb.Window):
         tk.Label(acc_frame, textvariable=self._runtime_var, font=("Courier New", 9), fg=TEXT_PRIMARY, bg=CARD_BG).pack(anchor="w", pady=(2, 0))
         report_frame = tk.Frame(body4, bg=CARD_BG)
         report_frame.pack(side="left", anchor="center")
-        self._flat_btn(report_frame, "📉  Confusion Matrix", ACCENT2, self._cmd_confusion_matrix).pack(fill="x", pady=5, ipadx=6, ipady=5)
-        self._flat_btn(report_frame, "📄  Classification Report", "#5c6370", self._cmd_classification_report).pack(fill="x", pady=5, ipadx=6, ipady=5)
+        self._flat_btn(report_frame, "  Confusion Matrix", ACCENT2, self._cmd_confusion_matrix).pack(fill="x", pady=5, ipadx=6, ipady=5)
+        self._flat_btn(report_frame, "  Classification Report", "#5c6370", self._cmd_classification_report).pack(fill="x", pady=5, ipadx=6, ipady=5)
 
         tk.Frame(right_col, bg=BORDER, height=1).pack(fill="x", padx=4)
 
@@ -2109,7 +2060,7 @@ class AutoDriveApp(tb.Window):
             anchor="w",
         )
         self._adv_dataset_label.pack(side="left")
-        self._flat_btn(adv_top, "📂  Import CSV", "#4f5d75", self._cmd_adv_import_csv).pack(side="left", padx=10)
+        self._flat_btn(adv_top, "  Import CSV", "#4f5d75", self._cmd_adv_import_csv).pack(side="left", padx=10)
 
         tk.Frame(body5, bg=BORDER, height=1).pack(fill="x", pady=(4, 8))
 
@@ -2140,10 +2091,10 @@ class AutoDriveApp(tb.Window):
 
         adv_actions = tk.Frame(body5, bg=CARD_BG)
         adv_actions.pack(fill="x", pady=(6, 2))
-        self._flat_btn(adv_actions, "⚙️  Preprocess", "#6c7a89", self._cmd_adv_preprocess).pack(side="left")
-        self._flat_btn(adv_actions, "🚀  Train", "#6c7a89", self._cmd_adv_train).pack(side="left", padx=8)
-        self._flat_btn(adv_actions, "📉  CM", "#6c7a89", self._cmd_adv_confusion_matrix).pack(side="left", padx=8)
-        self._flat_btn(adv_actions, "📄  Report", "#6c7a89", self._cmd_adv_classification_report).pack(side="left", padx=8)
+        self._flat_btn(adv_actions, "  Preprocess", "#6c7a89", self._cmd_adv_preprocess).pack(side="left")
+        self._flat_btn(adv_actions, "  Train", "#6c7a89", self._cmd_adv_train).pack(side="left", padx=8)
+        self._flat_btn(adv_actions, "  CM", "#6c7a89", self._cmd_adv_confusion_matrix).pack(side="left", padx=8)
+        self._flat_btn(adv_actions, "  Report", "#6c7a89", self._cmd_adv_classification_report).pack(side="left", padx=8)
 
         self._adv_status_var = tk.StringVar(value="Optional CSV lab ready.")
         tk.Label(body5, textvariable=self._adv_status_var, font=("Courier New", 9), fg=TEXT_PRIMARY, bg=CARD_BG).pack(anchor="w", pady=(6, 0))
@@ -2231,7 +2182,7 @@ class AutoDriveApp(tb.Window):
             self._ingest_stats.config(
                 text=f"Features: {summary['features']}    |    Classes: {summary['classes']}"
             )
-            self._preprocess_status.config(text="  ○  Pending", fg=TEXT_MUTED)
+            self._preprocess_status.config(text="    Pending", fg=TEXT_MUTED)
             self._result_var.set("--%")
             self._runtime_var.set("Runtime: --")
             self._last_driving_result = None
@@ -2244,7 +2195,7 @@ class AutoDriveApp(tb.Window):
         if self.df is None:
             messagebox.showerror("Error", "Load a driving task first.")
             return
-        self._preprocess_status.config(text="  ◌  Running…", fg=ACCENT3)
+        self._preprocess_status.config(text="    Running", fg=ACCENT3)
         self.update()
 
         def run():
@@ -2261,11 +2212,11 @@ class AutoDriveApp(tb.Window):
         threading.Thread(target=run, daemon=True).start()
 
     def _preprocess_done(self, summary):
-        self._preprocess_status.config(text="  ✔  Done", fg="#00ff88")
-        self.log(f"[OK]   Preprocessing — {summary}")
+        self._preprocess_status.config(text="    Done", fg="#00ff88")
+        self.log(f"[OK]   Preprocessing  {summary}")
 
     def _preprocess_fail(self, msg):
-        self._preprocess_status.config(text="  ✖  Failed", fg=ACCENT2)
+        self._preprocess_status.config(text="    Failed", fg=ACCENT2)
         messagebox.showerror("Error", msg)
 
     def _cmd_train(self):
@@ -2274,8 +2225,8 @@ class AutoDriveApp(tb.Window):
             return
         task = self._driving_task.get().strip().lower()
         algo = self._algo_var.get()
-        self.log(f"[INFO] Training {algo}…")
-        self._result_var.set("…")
+        self.log(f"[INFO] Training {algo}")
+        self._result_var.set("")
         self._runtime_var.set("Runtime: measuring...")
         self._train_progress.start(12)
         self.update()

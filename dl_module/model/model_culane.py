@@ -25,12 +25,6 @@ class parsingNet(torch.nn.Module):
 
         self.model = resnet(backbone, pretrained=pretrained)
 
-        # for avg pool experiment
-        # self.pool = torch.nn.AdaptiveAvgPool2d(1)
-        # self.pool = torch.nn.AdaptiveMaxPool2d(1)
-
-        # self.register_buffer('coord', torch.stack([torch.linspace(0.5,9.5,10).view(-1,1).repeat(1,50), torch.linspace(0.5,49.5,50).repeat(10,1)]).view(1,2,10,50))
-
         self.cls = torch.nn.Sequential(
             torch.nn.LayerNorm(self.input_dim) if fc_norm else torch.nn.Identity(),
             torch.nn.Linear(self.input_dim, mlp_mid_dim),
@@ -47,20 +41,17 @@ class parsingNet(torch.nn.Module):
         if self.use_aux:
             seg_out = self.seg_head(x2, x3,fea)
         fea = self.pool(fea)
-        # print(fea.shape)
-        # print(self.coord.shape)
-        # fea = torch.cat([fea, self.coord.repeat(fea.shape[0],1,1,1)], dim = 1)
-        
+
         fea = fea.view(-1, self.input_dim)
         out = self.cls(fea)
 
-        pred_dict = {'loc_row': out[:,:self.dim1].view(-1,self.num_grid_row, self.num_cls_row, self.num_lane_on_row), 
+        pred_dict = {'loc_row': out[:,:self.dim1].view(-1,self.num_grid_row, self.num_cls_row, self.num_lane_on_row),
                 'loc_col': out[:,self.dim1:self.dim1+self.dim2].view(-1, self.num_grid_col, self.num_cls_col, self.num_lane_on_col),
-                'exist_row': out[:,self.dim1+self.dim2:self.dim1+self.dim2+self.dim3].view(-1, 2, self.num_cls_row, self.num_lane_on_row), 
+                'exist_row': out[:,self.dim1+self.dim2:self.dim1+self.dim2+self.dim3].view(-1, 2, self.num_cls_row, self.num_lane_on_row),
                 'exist_col': out[:,-self.dim4:].view(-1, 2, self.num_cls_col, self.num_lane_on_col)}
         if self.use_aux:
             pred_dict['seg_out'] = seg_out
-        
+
         return pred_dict
 
     def forward_tta(self, x):
@@ -76,7 +67,7 @@ class parsingNet(torch.nn.Module):
 
         left_pooled_fea[:,:,:,:w-1] = pooled_fea[:,:,:,1:]
         left_pooled_fea[:,:,:,-1] = pooled_fea.mean(-1)
-        
+
         right_pooled_fea[:,:,:,1:] = pooled_fea[:,:,:,:w-1]
         right_pooled_fea[:,:,:,0] = pooled_fea.mean(-1)
 
@@ -85,15 +76,15 @@ class parsingNet(torch.nn.Module):
 
         down_pooled_fea[:,:,1:,:] = pooled_fea[:,:,:h-1,:]
         down_pooled_fea[:,:,0,:] = pooled_fea.mean(-2)
-        # 10 x 25
+
         fea = torch.cat([pooled_fea, left_pooled_fea, right_pooled_fea, up_pooled_fea, down_pooled_fea], dim = 0)
         fea = fea.view(-1, self.input_dim)
 
         out = self.cls(fea)
 
-        return {'loc_row': out[:,:self.dim1].view(-1,self.num_grid_row, self.num_cls_row, self.num_lane_on_row), 
+        return {'loc_row': out[:,:self.dim1].view(-1,self.num_grid_row, self.num_cls_row, self.num_lane_on_row),
                 'loc_col': out[:,self.dim1:self.dim1+self.dim2].view(-1, self.num_grid_col, self.num_cls_col, self.num_lane_on_col),
-                'exist_row': out[:,self.dim1+self.dim2:self.dim1+self.dim2+self.dim3].view(-1, 2, self.num_cls_row, self.num_lane_on_row), 
+                'exist_row': out[:,self.dim1+self.dim2:self.dim1+self.dim2+self.dim3].view(-1, 2, self.num_cls_row, self.num_lane_on_row),
                 'exist_col': out[:,-self.dim4:].view(-1, 2, self.num_cls_col, self.num_lane_on_col)}
 
 def get_model(cfg):

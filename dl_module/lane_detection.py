@@ -6,9 +6,6 @@ import numpy as np
 import os
 import torchvision.transforms as transforms
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STANDALONE UFLDv2 ARCHITECTURE (No external dependencies)
-# ─────────────────────────────────────────────────────────────────────────────
 class ResNetBackbone(nn.Module):
     def __init__(self):
         super().__init__()
@@ -42,16 +39,16 @@ class UFLDv2Net(nn.Module):
         self.num_cls_col = 81
         self.num_lane_on_row = 4
         self.num_lane_on_col = 4
-        
+
         self.dim1 = self.num_grid_row * self.num_cls_row * self.num_lane_on_row
         self.dim2 = self.num_grid_col * self.num_cls_col * self.num_lane_on_col
         self.dim3 = 2 * self.num_cls_row * self.num_lane_on_row
         self.dim4 = 2 * self.num_cls_col * self.num_lane_on_col
         self.total_dim = self.dim1 + self.dim2 + self.dim3 + self.dim4
-        
+
         mlp_mid_dim = 2048
-        self.input_dim = (320 // 32) * (1600 // 32) * 8  # 4000
-        
+        self.input_dim = (320 // 32) * (1600 // 32) * 8
+
         self.model = ResNetBackbone()
         self.cls = nn.Sequential(
             nn.LayerNorm(self.input_dim),
@@ -68,15 +65,12 @@ class UFLDv2Net(nn.Module):
         out = self.cls(fea)
 
         return {
-            'loc_row': out[:,:self.dim1].view(-1, self.num_grid_row, self.num_cls_row, self.num_lane_on_row), 
+            'loc_row': out[:,:self.dim1].view(-1, self.num_grid_row, self.num_cls_row, self.num_lane_on_row),
             'loc_col': out[:,self.dim1:self.dim1+self.dim2].view(-1, self.num_grid_col, self.num_cls_col, self.num_lane_on_col),
-            'exist_row': out[:,self.dim1+self.dim2:self.dim1+self.dim2+self.dim3].view(-1, 2, self.num_cls_row, self.num_lane_on_row), 
+            'exist_row': out[:,self.dim1+self.dim2:self.dim1+self.dim2+self.dim3].view(-1, 2, self.num_cls_row, self.num_lane_on_row),
             'exist_col': out[:,-self.dim4:].view(-1, 2, self.num_cls_col, self.num_lane_on_col)
         }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Configuration & State 
-# ─────────────────────────────────────────────────────────────────────────────
 UFLD_WEIGHTS = os.path.join("models", "culane_res18.pth")
 
 TRAIN_WIDTH = 1600
@@ -98,7 +92,7 @@ def _load_ufld():
         return True
 
     if not os.path.exists(UFLD_WEIGHTS):
-        print(f"⚠️ UFLD weights missing at {UFLD_WEIGHTS}. Lane detection disabled.")
+        print(f" UFLD weights missing at {UFLD_WEIGHTS}. Lane detection disabled.")
         return False
 
     try:
@@ -110,18 +104,18 @@ def _load_ufld():
             _device = torch.device('cpu')
 
         print(f"[INFO] Loading UFLDv2 Lane Detection on {_device}...")
-        
+
         _lane_net = UFLDv2Net().to(_device)
 
         state_dict = torch.load(UFLD_WEIGHTS, map_location='cpu')['model']
         compatible_state_dict = {k[7:] if 'module.' in k else k: v for k, v in state_dict.items()}
         _lane_net.load_state_dict(compatible_state_dict, strict=False)
         _lane_net.eval()
-        
-        print("✅ Ultra-Fast-Lane-Detection-V2 (ResNet18) loaded successfully.")
+
+        print(" Ultra-Fast-Lane-Detection-V2 (ResNet18) loaded successfully.")
         return True
     except Exception as e:
-        print(f"❌ Failed to load UFLDv2: {e}")
+        print(f" Failed to load UFLDv2: {e}")
         _lane_net = None
         return False
 
@@ -184,19 +178,18 @@ def detect_lanes_data(frame: np.ndarray):
     )
     lane_dict = {}
     for i, lane in enumerate(lanes):
-        # Skip invalid lanes
+
         if lane is None or len(lane) < 2:
             continue
         try:
-            # Convert to OpenCV-compatible format
+
             lane_arr = np.array(lane, dtype=np.int32)
-            # Required shape for OpenCV polylines
+
             lane_arr = lane_arr.reshape((-1, 1, 2))
             lane_dict[i] = lane_arr
         except Exception as e:
             print(f"[lane] Failed processing lane {i}: {e}")
     return lane_dict
-
 
 def detect_lanes_image(image_path: str):
     img = cv2.imread(image_path)
@@ -204,7 +197,7 @@ def detect_lanes_image(image_path: str):
         raise ValueError(f"Could not read image: {image_path}")
     lane_dict = detect_lanes_data(img)
     for lane_id, lane_points in lane_dict.items():
-        # Additional safety check
+
         if lane_points is None or len(lane_points) < 2:
             continue
         try:
