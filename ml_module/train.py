@@ -15,7 +15,6 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.svm import SVC
 from sklearn.tree import DecisionTreeClassifier
 
-
 TRAFFIC_SIGN_FAMILY = {
     "speed_limit": list(range(0, 9)),
     "prohibitory": list(range(9, 18)),
@@ -23,7 +22,6 @@ TRAFFIC_SIGN_FAMILY = {
     "mandatory": list(range(32, 41)),
     "other": [41, 42],
 }
-
 
 def _algorithm_factory(algorithm):
     models = {
@@ -34,11 +32,9 @@ def _algorithm_factory(algorithm):
     }
     return models.get(algorithm, DecisionTreeClassifier(random_state=42))
 
-
 def _safe_mkdir(path):
     if not os.path.exists(path):
         os.makedirs(path)
-
 
 def _extract_sign_code(raw_value):
     raw = str(raw_value)
@@ -48,13 +44,11 @@ def _extract_sign_code(raw_value):
             tokens.append(int(token))
     return sum(tokens) if tokens else 0
 
-
 def _get_sign_family(class_id):
     for family, class_ids in TRAFFIC_SIGN_FAMILY.items():
         if int(class_id) in class_ids:
             return family
     return "unknown"
-
 
 def _compute_image_features(image_path):
     image = cv2.imread(image_path)
@@ -72,15 +66,8 @@ def _compute_image_features(image_path):
         "blur_score": blur_score,
     }
 
-
 def load_driving_dataset(task="metadata", data_dir="data", max_samples=5000):
-    """
-    Load traffic-sign-oriented tabular datasets.
 
-    task:
-        - metadata: use Meta.csv fields (ShapeId, ColorId, SignId) -> ClassId
-        - robustness: use Train/Test csv geometry + image quality features -> ClassId
-    """
     if task == "metadata":
         meta_path = os.path.join(data_dir, "Meta.csv")
         train_path = os.path.join(data_dir, "Train.csv")
@@ -157,7 +144,6 @@ def load_driving_dataset(task="metadata", data_dir="data", max_samples=5000):
 
     raise ValueError("Unsupported task. Use 'metadata' or 'robustness'.")
 
-
 def get_driving_dataset_summary(task="metadata", data_dir="data", max_samples=5000):
     X, y, _ = load_driving_dataset(task=task, data_dir=data_dir, max_samples=max_samples)
     return {
@@ -166,7 +152,6 @@ def get_driving_dataset_summary(task="metadata", data_dir="data", max_samples=50
         "features": int(X.shape[1]),
         "classes": int(y.nunique()),
     }
-
 
 def _write_artifacts(y_test, y_pred, algorithm, task, report_dir="Public"):
     _safe_mkdir(report_dir)
@@ -216,12 +201,8 @@ def _write_artifacts(y_test, y_pred, algorithm, task, report_dir="Public"):
         "grouped_error_report_path": grouped_path,
     }
 
-
 def train_driving_model(task="metadata", algorithm="Decision Tree", data_dir="data", test_size=0.2, random_state=42, max_samples=5000):
-    """
-    Train and evaluate a driving-oriented tabular model.
-    Returns metrics, runtime, and artifact paths.
-    """
+
     t0 = time.perf_counter()
     X, y, _ = load_driving_dataset(task=task, data_dir=data_dir, max_samples=max_samples)
     class_counts = y.value_counts()
@@ -278,11 +259,8 @@ def train_driving_model(task="metadata", algorithm="Decision Tree", data_dir="da
         **artifacts,
     }
 
-
 def train_model(df, target_column, algorithm):
-    """
-    Legacy generic trainer retained for optional advanced CSV sandbox.
-    """
+
     df = df.dropna(subset=[target_column])
     X = df.drop(columns=[target_column]).copy()
     y = df[target_column].copy()

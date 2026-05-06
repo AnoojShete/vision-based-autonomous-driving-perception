@@ -1,9 +1,15 @@
+# --- UI & Graphics ---
+Pillow
+ttkbootstrap
+matplotlib
+seaborn
+
+# --- Computer Vision & Deep Learning ---
 opencv-python
 numpy
 pandas
-ttkbootstrap
-ultralytics
-tensorflow
 scikit-learn
-matplotlib
-seaborn
+tensorflow
+torch
+torchvision
+ultralytics
